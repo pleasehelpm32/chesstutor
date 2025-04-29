@@ -1,0 +1,30 @@
+// prisma/schema.prisma
+
+// Generator block should be first
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Datasource block should be second
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  // directUrl = env("DIRECT_DATABASE_URL") // Optional, uncomment if needed for migrations
+}
+
+// <<<--- IMPORTANT: The model block MUST start AFTER the closing '}' of the datasource block
+
+// Model block(s) should be last, at the top level of the file
+model Analysis {
+  id                   String    @id @default(uuid())
+  fen                  String
+  depth                Int
+  stockfish_best_moves Json?
+  llm_explanation      String?
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  @@index([fen, depth])
+  // @@map("analyses") // Optional: uncomment if you prefer the table name 'analyses'
+}
+
+// You can add more models here later, each starting with 'model ModelName { ... }'
