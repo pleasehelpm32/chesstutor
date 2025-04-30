@@ -4,20 +4,20 @@ import { Button } from "@/components/ui/button";
 
 interface AnalysisControlsProps {
   isLoading: boolean;
-  isValidFen: boolean;
-  onAnalyzeClick: () => void; // Function passed from App.tsx
+  canAnalyze: boolean; // Renamed prop for clarity (e.g., !game.isGameOver())
+  onAnalyzeClick: () => void;
 }
 
 const AnalysisControls: React.FC<AnalysisControlsProps> = ({
   isLoading,
-  isValidFen,
+  canAnalyze, // Use the renamed prop
   onAnalyzeClick,
 }) => {
   return (
     <Button
       onClick={onAnalyzeClick}
-      disabled={!isValidFen || isLoading}
-      className="w-full"
+      disabled={!canAnalyze || isLoading} // Use canAnalyze
+      className="w-full mt-4" // Added margin-top
     >
       {isLoading ? "Analyzing..." : "Analyze Position"}
     </Button>

@@ -1,7 +1,8 @@
 // src/App.tsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import type { CSSProperties } from "react";
 import { Chess } from "chess.js";
+import type { Square } from "chess.js"; // Import Square type
 
 // Import Components
 import BackendStatus from "./components/BackendStatus";
@@ -10,52 +11,38 @@ import ChessboardDisplay from "./components/ChessboardDisplay";
 import AnalysisControls from "./components/AnalysisControls";
 import AnalysisResults from "./components/AnalysisResults";
 
-// --- Define Types (can be moved to a shared types file, e.g., src/types.ts) ---
-
+// --- Define Types ---
 interface AnalysisMove {
   move: string;
   isCheckmate: boolean;
 }
-
 interface AnalysisResponse {
   topMoves: AnalysisMove[];
 }
-
 interface ExplainResponse {
   explanation: string;
 }
-
-// Type for square styles object (highlights)
-type SquareStyles = {
-  [square: string]: CSSProperties;
-};
-
-// Type for arrows: Array of [from, to, optionalColor]
+type SquareStyles = { [square: string]: CSSProperties };
 type Arrows = Array<[string, string, string?]>;
-
-// Type for move number overlays
-type MoveNumberStyles = {
-  [square: string]: number;
-};
+type MoveNumberStyles = { [square: string]: number };
 
 // --- React Component ---
-
 function App() {
   // --- State Variables ---
   const [backendStatus, setBackendStatus] = useState("checking...");
-  const [fen, setFen] = useState(
-    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-  );
-  const [fenError, setFenError] = useState<string | null>(null);
-  const [isValidFen, setIsValidFen] = useState(true);
+  // Game state managed by chess.js instance
+  const [game, setGame] = useState(() => new Chess()); // Initialize with chess.js
+  // FEN state primarily for the input box display and loading new positions
+  const [fenInput, setFenInput] = useState(game.fen());
+  const [fenLoadError, setFenLoadError] = useState<string | null>(null); // Error loading FEN from input
   const [boardWidth, setBoardWidth] = useState(400);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(false); // For API loading
   const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(
     null
   );
   const [explanationResult, setExplanationResult] =
     useState<ExplainResponse | null>(null);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null); // For API errors
   const [squareStyles, setSquareStyles] = useState<SquareStyles>({});
   const [arrows, setArrows] = useState<Arrows>([]);
   const [moveNumberStyles, setMoveNumberStyles] = useState<MoveNumberStyles>(
@@ -67,18 +54,10 @@ function App() {
   // Check backend health on mount
   useEffect(() => {
     fetch("http://localhost:3001/api/health")
-      .then((res) => {
-        if (!res.ok) throw new Error("Network response was not ok");
-        return res.json();
-      })
+      .then((res) => (res.ok ? res.json() : Promise.reject("Network error")))
       .then((data) => setBackendStatus(data.status || "error"))
       .catch(() => setBackendStatus("error"));
   }, []);
-
-  // Validate FEN whenever it changes
-  useEffect(() => {
-    validateFen(fen);
-  }, [fen]);
 
   // Basic board resizing
   useEffect(() => {
@@ -86,35 +65,92 @@ function App() {
     if (container) {
       setBoardWidth(Math.min(container.clientWidth, 560));
     }
+    // Consider adding a resize listener for dynamic updates
   }, []);
 
-  // --- Helper Functions ---
+  // --- Game Logic Functions ---
 
-  // Validate FEN and clear visuals if invalid
-  const validateFen = (currentFen: string) => {
+  // Function to safely update the game state from FEN input
+  const loadFen = useCallback((fenToLoad: string) => {
     try {
-      new Chess(currentFen);
-      setFenError(null);
-      setIsValidFen(true);
-    } catch (e) {
-      setFenError("Invalid FEN string");
-      setIsValidFen(false);
+      const newGame = new Chess(fenToLoad); // Validate FEN by creating instance
+      setGame(newGame); // Update game state
+      setFenLoadError(null); // Clear any previous loading error
+      // Clear analysis visuals when loading a new FEN manually
       setAnalysisResult(null);
       setExplanationResult(null);
+      setAnalysisError(null);
       setSquareStyles({});
       setArrows([]);
       setMoveNumberStyles({});
+    } catch (e) {
+      setFenLoadError("Invalid FEN string"); // Set error if FEN is invalid
     }
-  };
+  }, []); // No dependencies, this function is stable
 
   // Handle changes in the FEN input field
-  const handleFenChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setFen(event.target.value);
+  const handleFenInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const newFen = event.target.value;
+    setFenInput(newFen); // Update the input box value
+    // Attempt to load the FEN immediately for validation feedback
+    loadFen(newFen);
   };
+
+  // Handle piece drop on the board (user making a move)
+  const onPieceDrop = useCallback(
+    (sourceSquare: Square, targetSquare: Square, piece: string): boolean => {
+      // Prevent moves if analysis is loading
+      if (isLoading) return false;
+
+      // Create a copy of the game to test the move
+      const gameCopy = new Chess(game.fen());
+      let moveResult = null;
+
+      try {
+        moveResult = gameCopy.move({
+          from: sourceSquare,
+          to: targetSquare,
+          promotion: "q", // Default to queen promotion for simplicity
+        });
+      } catch (e) {
+        // Catch errors from invalid move format (less likely with react-chessboard)
+        console.error("Error making move:", e);
+        return false; // Indicate illegal move
+      }
+
+      // If move is illegal chess.js returns null
+      if (moveResult === null) {
+        return false; // Snap piece back
+      }
+
+      // Move is legal, update the main game state
+      setGame(gameCopy);
+
+      // Clear previous analysis/explanation after a valid move
+      setAnalysisResult(null);
+      setExplanationResult(null);
+      setAnalysisError(null);
+      setSquareStyles({});
+      setArrows([]);
+      setMoveNumberStyles({});
+
+      // TODO: Trigger computer move logic here in Phase B
+
+      return true; // Move successful
+    },
+    [game, isLoading] // Depend on game state and loading status
+  );
+
+  // --- Analysis Functions ---
 
   // Handle the "Analyze Position" button click
   const handleAnalyzeClick = async () => {
-    if (!isValidFen) return;
+    // Use the current game's FEN
+    const currentFen = game.fen();
+    if (game.isGameOver()) {
+      setAnalysisError("Cannot analyze: Game is over.");
+      return;
+    }
 
     setIsLoading(true);
     setAnalysisResult(null);
@@ -129,7 +165,7 @@ function App() {
       const analyzeResponse = await fetch("http://localhost:3001/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen }),
+        body: JSON.stringify({ fen: currentFen }), // Send current game FEN
       });
       if (!analyzeResponse.ok) {
         const errorData = await analyzeResponse.json().catch(() => ({}));
@@ -147,7 +183,7 @@ function App() {
       const newArrows: Arrows = [];
       const newMoveNumbers: MoveNumberStyles = {};
       const highlightColor = "rgba(255, 255, 0, 0.4)";
-      const arrowColor = "rgb(255, 165, 0)";
+      const arrowColor = "rgb(255, 165, 0)"; // Orange arrows
 
       if (analysisData.topMoves && analysisData.topMoves.length > 0) {
         analysisData.topMoves.forEach((analysisMove, index) => {
@@ -160,6 +196,7 @@ function App() {
               newStyles[fromSquare] = { backgroundColor: highlightColor };
               newStyles[toSquare] = { backgroundColor: highlightColor };
               if (index < 3) {
+                // Only draw arrows/numbers for top 3
                 newArrows.push([fromSquare, toSquare, arrowColor]);
                 newMoveNumbers[toSquare] = index + 1;
               }
@@ -173,7 +210,7 @@ function App() {
       // --- End Generate Visuals ---
 
       if (!analysisData.topMoves || analysisData.topMoves.length === 0) {
-        setExplanationResult(null); // No moves, no explanation needed
+        setExplanationResult(null);
       } else {
         // --- Call /api/explain ---
         const explainResponse = await fetch(
@@ -181,7 +218,10 @@ function App() {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ fen, topMoves: analysisData.topMoves }),
+            body: JSON.stringify({
+              fen: currentFen,
+              topMoves: analysisData.topMoves,
+            }),
           }
         );
         if (!explainResponse.ok) {
@@ -191,9 +231,7 @@ function App() {
               explainResponse.statusText
             } - ${errorData?.error || "Unknown error"}`
           );
-          setExplanationResult({
-            explanation: "Error fetching explanation.",
-          });
+          setExplanationResult({ explanation: "Error fetching explanation." }); // Show error in results
         } else {
           const explanationData: ExplainResponse = await explainResponse.json();
           setExplanationResult(explanationData);
@@ -204,6 +242,7 @@ function App() {
       const message =
         error instanceof Error ? error.message : "Unknown analysis error";
       setAnalysisError(message);
+      // Clear visuals on error
       setSquareStyles({});
       setArrows([]);
       setMoveNumberStyles({});
@@ -214,39 +253,57 @@ function App() {
 
   // --- Render JSX ---
   return (
-    <div className="container mx-auto p-4 max-w-2xl">
+    <div className="container mx-auto p-4 max-w-4xl">
+      {" "}
+      {/* Increased max-width slightly */}
       <h1 className="text-2xl font-bold mb-4 text-center">Chess Tutor</h1>
-
       <BackendStatus status={backendStatus} />
+      {/* Use flex layout for board and potential side panel later */}
+      <div className="flex flex-col md:flex-row gap-4">
+        {/* Left side (Board and Controls) */}
+        <div className="flex-grow">
+          <FenInput
+            // Use fenInput for display, but loadFen handles validation/update
+            fen={fenInput}
+            onFenChange={handleFenInputChange}
+            fenError={fenLoadError} // Show loading errors here
+            isLoading={isLoading} // Disable while analyzing
+          />
 
-      <FenInput
-        fen={fen}
-        onFenChange={handleFenChange}
-        fenError={fenError}
-        isLoading={isLoading}
-      />
+          <ChessboardDisplay
+            // Pass current game FEN to the board
+            position={game.fen()}
+            // isValidFen is implicitly true if game object exists
+            boardWidth={boardWidth}
+            squareStyles={squareStyles}
+            arrows={arrows}
+            moveNumberStyles={moveNumberStyles}
+            // Add the drop handler
+            onPieceDrop={onPieceDrop}
+            // Enable dragging
+            arePiecesDraggable={true}
+            // Determine board orientation based on whose turn (optional)
+            boardOrientation={game.turn() === "w" ? "white" : "black"}
+          />
 
-      <ChessboardDisplay
-        fen={fen}
-        isValidFen={isValidFen}
-        boardWidth={boardWidth}
-        squareStyles={squareStyles}
-        arrows={arrows}
-        moveNumberStyles={moveNumberStyles}
-      />
+          <AnalysisControls
+            isLoading={isLoading}
+            // Disable analysis if game is over
+            canAnalyze={!game.isGameOver()} // Use game state instead of isValidFen
+            onAnalyzeClick={handleAnalyzeClick}
+          />
+        </div>
 
-      <AnalysisControls
-        isLoading={isLoading}
-        isValidFen={isValidFen}
-        onAnalyzeClick={handleAnalyzeClick}
-      />
-
-      <AnalysisResults
-        isLoading={isLoading}
-        analysisError={analysisError}
-        analysisResult={analysisResult}
-        explanationResult={explanationResult}
-      />
+        {/* Right side (Analysis Results - can become side panel) */}
+        <div className="w-full md:w-1/3 flex-shrink-0">
+          <AnalysisResults
+            isLoading={isLoading}
+            analysisError={analysisError} // Show API errors here
+            analysisResult={analysisResult}
+            explanationResult={explanationResult}
+          />
+        </div>
+      </div>
     </div>
   );
 }
