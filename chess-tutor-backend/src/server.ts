@@ -7,6 +7,7 @@ import path from "path";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import OpenAI from "openai";
 import { Chess } from "chess.js";
+import { subDays } from "date-fns"; // Import date-fns for easy date calculation
 
 dotenv.config();
 
@@ -243,7 +244,7 @@ app.post("/api/analyze", (async (req: Request, res: Response) => {
                 try {
                   // Use a temporary game instance for each move check if undo is complex
                   const tempGame = new Chess(currentFen);
-                  const moveResult = tempGame.move(move); // Use sloppy for e2e4 format
+                  const moveResult = tempGame.move(move);
                   if (moveResult && tempGame.isCheckmate()) {
                     isCheckmate = true;
                   }
@@ -296,7 +297,10 @@ app.post("/api/analyze", (async (req: Request, res: Response) => {
 }) as RequestHandler);
 // --- End Analyze Endpoint ---
 
-// --- Explain Endpoint (with Conditional Prompting) ---
+// --- Explain Endpoint (with Caching) ---
+const EXPLAIN_ANALYSIS_DEPTH = 5; // MUST match ANALYSIS_DEPTH
+const CACHE_DURATION_DAYS = 7;
+
 app.post("/api/explain", (async (req: Request, res: Response) => {
   // Expect 'topMoves' array of objects: { move: string, isCheckmate: boolean }
   const { fen, topMoves } = req.body;
@@ -322,6 +326,46 @@ app.post("/api/explain", (async (req: Request, res: Response) => {
   const movesToExplain = topMoves.slice(0, 3);
   // --- End Validation ---
 
+  // --- Cache Lookup ---
+  const cacheCutoffDate = subDays(new Date(), CACHE_DURATION_DAYS); // Calculate date 7 days ago
+
+  try {
+    console.log(
+      `Checking cache for FEN: ${fen} at depth ${EXPLAIN_ANALYSIS_DEPTH}`
+    );
+    const cachedAnalysis = await prisma.analysis.findFirst({
+      where: {
+        fen: fen,
+        depth: EXPLAIN_ANALYSIS_DEPTH,
+        createdAt: {
+          gte: cacheCutoffDate, // Check if created within the last 7 days
+        },
+        llm_explanation: {
+          // Ensure explanation exists
+          not: null,
+        },
+      },
+      orderBy: {
+        createdAt: "desc", // Get the most recent entry if multiple somehow exist
+      },
+    });
+
+    if (cachedAnalysis && cachedAnalysis.llm_explanation) {
+      console.log(`Cache HIT for FEN: ${fen}`);
+      // Return cached explanation
+      return res.json({
+        explanation: cachedAnalysis.llm_explanation,
+        cacheHit: true,
+      });
+    } else {
+      console.log(`Cache MISS for FEN: ${fen}`);
+    }
+  } catch (error) {
+    console.error("Database cache lookup failed:", error);
+    // Proceed without cache, but log the error
+  }
+  // --- End Cache Lookup ---
+
   if (!openai.apiKey) {
     console.error("Explain request failed: OpenAI API key not configured.");
     return res
@@ -329,10 +373,7 @@ app.post("/api/explain", (async (req: Request, res: Response) => {
       .json({ error: "OpenAI API key not configured on server." });
   }
 
-  console.log(
-    `Received explanation request for FEN: ${fen}, Moves data:`,
-    movesToExplain
-  );
+  console.log(`OpenAI call for FEN: ${fen}, Moves data:`, movesToExplain);
 
   // Find if there's a checkmating move
   const checkmatingMove = movesToExplain.find((m) => m.isCheckmate);
@@ -347,75 +388,55 @@ app.post("/api/explain", (async (req: Request, res: Response) => {
     .join("\n");
 
   if (checkmatingMove) {
-    // --- Prompt for when CHECKMATE is found (Stricter) ---
+    // --- Prompt for when CHECKMATE is found ---
     const otherMoves = movesToExplain.filter((m) => !m.isCheckmate);
-    // Dynamically create the required format string for other moves
-    const otherMovesFormat = otherMoves
-      .map(
-        (m) =>
-          `*   **${m.move}:** The [Piece Type identified from FEN] on [Start Square] moves to [End Square]. [1 sentence idea], but this is inferior as it doesn't deliver checkmate.`
-      )
-      .join("\n");
+    let otherMovesExplanation = "";
+    if (otherMoves.length > 0) {
+      otherMovesExplanation = `\n*   **Other options (${otherMoves
+        .map((m) => m.move)
+        .join(
+          ", "
+        )}):** Briefly explain the idea behind these moves (1 sentence each), but state clearly they are inferior because they don't deliver the immediate win.`;
+    }
 
-    prompt = `You are a factual and expert chess tutor delivering critical information. **Provide only the requested analysis, formatted exactly as specified below. Do not include any introductory or concluding remarks like "Sure!" or "Let's break down...".**
+    prompt = `You are an expert and friendly chess tutor explaining a critical game-winning move to a beginner student.
 
-**FEN:** ${fen}
-**Stockfish Top Moves:**
+Analyze the following chess position given in FEN notation:
+${fen}
+
+Stockfish identifies the following top moves:
 ${moveListForPrompt}
 
-**CRITICAL ALERT: Move ${checkmatingMove.move} delivers CHECKMATE!**
+**CRITICAL ACTION REQUIRED: The move ${checkmatingMove.move} delivers CHECKMATE and wins the game immediately!** This is the most important move by far.
 
-**Instructions:**
-1.  **For the checkmating move (${checkmatingMove.move}):**
-    *   Determine the starting square (e.g., 'a6' from 'a6a8').
-    *   **CRITICAL:** Identify the exact piece type (Pawn, Knight, Bishop, Rook, Queen, King) located on that starting square according to the provided FEN string.
-    *   Explain HOW *that specific piece* delivers checkmate (e.g., "attacks the king which has no escape squares..."). Emphasize the immediate win.
-2.  **For any other listed moves (if they exist):**
-    *   Determine the starting square.
-    *   **CRITICAL:** Identify the exact piece type on that starting square using the FEN.
-    *   Briefly state the move's minor idea (1 sentence) and explicitly mention it's inferior as it doesn't win immediately.
+Please explain the moves like this:
+*   **${checkmatingMove.move} (CHECKMATE):** **Emphasize that this move delivers checkmate and instantly wins.** Explain *how* it checkmates (e.g., "attacks the king which has no escape squares and cannot be blocked or captured"). Make this explanation the primary focus.${otherMovesExplanation}
 
-**Required Output Format (Use Markdown, EXACTLY as shown):**
-*   **${checkmatingMove.move} (CHECKMATE!):** The [Piece Type identified from FEN] on [Start Square] moves to [End Square]. [Explanation of how *this piece* delivers checkmate and wins].
-${otherMovesFormat}
-
-**Constraint Checklist (MUST FOLLOW):**
-*   Output ONLY the bulleted list of explanations, starting directly with the first bullet point.
-*   Base piece identification STRICTLY on the FEN for ALL moves.
-*   No conversational introductions or conclusions.
-*   Adhere precisely to the specified output format.`;
+Prioritize explaining the checkmate clearly and urgently.`;
   } else {
-    // --- Prompt for when NO checkmate is found (Stricter) ---
-    // Dynamically create the required format string
-    const moveExamplesFormat = movesToExplain
+    // --- Prompt for when NO checkmate is found ---
+    const moveExamples = movesToExplain
       .map(
         (m) =>
-          `*   **${m.move}:** The [Piece Type identified from FEN] on [Start Square] moves to [End Square]. [1-2 sentence explanation of the move's idea].`
+          `*   **${m.move}:** [Explanation focusing on the key idea for ${m.move}]`
       )
       .join("\n");
 
-    prompt = `You are a factual and expert chess tutor. **Provide only the requested analysis, formatted exactly as specified below. Do not include any introductory or concluding remarks like "Sure!" or "Let's break down...".**
+    prompt = `You are an expert and friendly chess tutor explaining Stockfish's top move suggestions to a beginner student.
 
-**FEN:** ${fen}
-**Stockfish Top Moves:**
+Analyze the following chess position given in FEN notation:
+${fen}
+
+Stockfish identifies the following top moves as strong options (none are immediate checkmate):
 ${moveListForPrompt}
 
-**Instructions:** For EACH move listed above:
-1.  Determine the starting square (e.g., for 'e5g7', the start square is 'e5').
-2.  **CRITICAL:** Identify the exact piece type (Pawn, Knight, Bishop, Rook, Queen, King) located on that starting square according to the provided FEN string.
-3.  Explain the primary strategic or tactical idea behind moving *that specific piece* to the destination square (1-2 concise sentences). Consider relevant concepts like center control, development, threats, king safety, or pawn structure.
+For **each** of these moves, briefly explain (1-2 sentences) the main strategic or tactical idea behind it, using simple terms. Consider concepts like center control, piece development, threats, king safety, and pawn structure where relevant.
 
-**Required Output Format (Use Markdown, EXACTLY as shown):**
-${moveExamplesFormat}
+Please format your response clearly, addressing each move separately, like this example:
+${moveExamples}
 
-**Constraint Checklist (MUST FOLLOW):**
-*   Output ONLY the bulleted list of explanations, starting directly with the first bullet point.
-*   Base piece identification STRICTLY on the FEN.
-*   Keep explanations concise (1-2 sentences per move).
-*   No conversational filler.
-*   Adhere precisely to the specified output format.`;
+Keep the explanations concise and focused on the most important immediate benefit for a beginner to understand for each move.`;
   }
-
   // --- End Prompt Construction ---
 
   try {
@@ -424,7 +445,7 @@ ${moveExamplesFormat}
     const temperature = checkmatingMove ? 0.4 : 0.5; // Adjust temp based on prompt type
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-3.5-turbo", // Or "gpt-4o-mini" etc.
       messages: [{ role: "user", content: prompt }],
       temperature: temperature,
       max_tokens: maxTokens,
@@ -440,7 +461,31 @@ ${moveExamplesFormat}
     }
 
     console.log("Received explanation from OpenAI.");
-    res.json({ explanation });
+
+    // --- Store result in Cache ---
+    try {
+      console.log(`Storing explanation in cache for FEN: ${fen}`);
+      // Store the original topMoves array (which includes isCheckmate flags) as JSON
+      const movesToCache = topMoves; // Use the original array received
+
+      await prisma.analysis.create({
+        data: {
+          fen: fen,
+          depth: EXPLAIN_ANALYSIS_DEPTH,
+          llm_explanation: explanation,
+          // Ensure Prisma schema's stockfish_best_moves is Json type
+          stockfish_best_moves: movesToCache as any, // Store the array of objects
+        },
+      });
+      console.log(`Cache stored successfully for FEN: ${fen}`);
+    } catch (dbError) {
+      console.error("Failed to store explanation in database cache:", dbError);
+      // Don't fail the request, just log the caching error
+    }
+    // --- End Store result ---
+
+    // Return the newly generated explanation
+    res.json({ explanation, cacheHit: false });
   } catch (error: any) {
     console.error("Error calling OpenAI API:", error);
     let errorMessage = "Failed to get explanation due to an internal error.";
