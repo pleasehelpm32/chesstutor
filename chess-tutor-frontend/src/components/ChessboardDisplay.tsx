@@ -33,7 +33,6 @@ const ChessboardDisplay: React.FC<ChessboardDisplayProps> = ({
   boardWidth,
   squareStyles,
   arrows,
-  moveNumberStyles,
   onPieceDrop, // Receive the handler
   arePiecesDraggable, // Receive draggable status
   boardOrientation, // Receive orientation

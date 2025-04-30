@@ -98,7 +98,7 @@ function App() {
 
   // Handle piece drop on the board (user making a move)
   const onPieceDrop = useCallback(
-    (sourceSquare: Square, targetSquare: Square, piece: string): boolean => {
+    (sourceSquare: Square, targetSquare: Square): boolean => {
       // Prevent moves if analysis is loading
       if (isLoading) return false;
 
@@ -146,6 +146,8 @@ function App() {
   // Handle the "Analyze Position" button click
   const handleAnalyzeClick = async () => {
     // Use the current game's FEN
+    const API_BASE_URL =
+      import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
     const currentFen = game.fen();
     if (game.isGameOver()) {
       setAnalysisError("Cannot analyze: Game is over.");
@@ -162,7 +164,7 @@ function App() {
 
     try {
       // --- Call /api/analyze ---
-      const analyzeResponse = await fetch("http://localhost:3001/api/analyze", {
+      const analyzeResponse = await fetch(`${API_BASE_URL}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fen: currentFen }), // Send current game FEN
@@ -213,17 +215,14 @@ function App() {
         setExplanationResult(null);
       } else {
         // --- Call /api/explain ---
-        const explainResponse = await fetch(
-          "http://localhost:3001/api/explain",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              fen: currentFen,
-              topMoves: analysisData.topMoves,
-            }),
-          }
-        );
+        const explainResponse = await fetch(`${API_BASE_URL}/api/explain`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fen: currentFen,
+            topMoves: analysisData.topMoves,
+          }),
+        });
         if (!explainResponse.ok) {
           const errorData = await explainResponse.json().catch(() => ({}));
           console.error(
