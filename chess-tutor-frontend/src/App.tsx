@@ -65,7 +65,7 @@ function App() {
 
   // Check backend health on mount
   useEffect(() => {
-    fetch("http://localhost:3001/api/health")
+    fetch(import.meta.env.VITE_API_BASE_URL + "/api/health")
       .then((res) => (res.ok ? res.json() : Promise.reject("Network error")))
       .then((data) => setBackendStatus(data.status || "error"))
       .catch(() => setBackendStatus("error"));
@@ -152,7 +152,7 @@ function App() {
       try {
         console.log("Requesting computer move...");
         const response = await fetch(
-          "http://localhost:3001/api/get-computer-move",
+          import.meta.env.VITE_API_BASE_URL + "/api/get-computer-move",
           {
             method: "POST", // Ensure method is POST
             headers: { "Content-Type": "application/json" },
