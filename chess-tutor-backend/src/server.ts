@@ -125,19 +125,27 @@ const allowedOrigins = [
   "https://chesslearnings.netlify.app/", // Your deployed frontend URL
 ];
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.indexOf(origin) === -1) {
-        const msg = `CORS policy does not allow access from origin: ${origin}`;
-        console.error(msg); // Log the blocked origin for debugging
-        return callback(new Error(msg), false);
-      }
-      return callback(null, true);
-    },
-  })
-);
+// Configure CORS options
+const corsOptions = {
+  origin: function (
+    requestOrigin: string | undefined,
+    callback: (err: Error | null, allow?: boolean) => void
+  ) {
+    // Allow requests with no origin OR if origin is in allowedOrigins
+    if (!requestOrigin || allowedOrigins.indexOf(requestOrigin) !== -1) {
+      callback(null, true);
+    } else {
+      console.error(`CORS Error: Origin ${requestOrigin} not allowed.`); // Log blocked origin
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  methods: "GET,HEAD,PUT,PATCH,POST,DELETE", // Explicitly allow POST
+  preflightContinue: false, // Let CORS handle OPTIONS fully
+  optionsSuccessStatus: 204, // Standard for OPTIONS response
+};
+
+// Apply CORS middleware globally BEFORE routes
+app.use(cors(corsOptions));
 app.use(express.json());
 // --- API Routes ---
 
