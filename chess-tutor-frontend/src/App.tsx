@@ -1,9 +1,14 @@
 // src/App.tsx
 /* eslint-disable @typescript-eslint/no-unused-vars */
-import React, { useEffect, useState, useCallback } from "react";
+import React, {
+  useEffect,
+  useState,
+  useCallback,
+  useRef, // Import useRef
+} from "react";
 import type { CSSProperties } from "react";
 import { Chess } from "chess.js";
-import type { Square } from "chess.js"; // Import Square type
+import type { Square, Color } from "chess.js";
 
 // Import Components
 import BackendStatus from "./components/BackendStatus";
@@ -29,37 +34,55 @@ interface ComputerMoveResponse {
   move: string | null; // Can be null if no move found
   message?: string;
 }
+const validMoveDotStyle: CSSProperties = {
+  // Green dot using radial gradient for better appearance
+  background:
+    "radial-gradient(circle, rgba(40, 167, 69, 0.6) 25%, transparent 30%)",
+  // Ensure the dot doesn't interfere with piece dragging (optional but good practice)
+  pointerEvents: "none",
+};
+const selectedPieceSquareStyle: CSSProperties = {
+  // Subtle yellow highlight for the selected piece's square
+  backgroundColor: "rgba(255, 255, 0, 0.3)",
+};
 
 type SquareStyles = { [square: string]: CSSProperties };
 type Arrows = Array<[string, string, string?]>;
 type MoveNumberStyles = { [square: string]: number };
 
+// --- Constants ---
+const MAX_BOARD_WIDTH = 560; // Max width for the board
+const MIN_BOARD_WIDTH = 250; // Min width to prevent extreme shrinking
+
 // --- React Component ---
 function App() {
   // --- State Variables ---
   const [backendStatus, setBackendStatus] = useState("checking...");
-  // Game state managed by chess.js instance
-  const [game, setGame] = useState(() => new Chess()); // Initialize with chess.js
-  // FEN state primarily for the input box display and loading new positions
+  const [game, setGame] = useState(() => new Chess());
   const [fenInput, setFenInput] = useState(game.fen());
-  const [fenLoadError, setFenLoadError] = useState<string | null>(null); // Error loading FEN from input
-  const [boardWidth, setBoardWidth] = useState(400);
-  const [isLoading, setIsLoading] = useState(false); // For API loading
+  const [fenLoadError, setFenLoadError] = useState<string | null>(null);
+  const [boardWidth, setBoardWidth] = useState(MIN_BOARD_WIDTH); // Start with min
+  const [isLoading, setIsLoading] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(
     null
   );
   const [explanationResult, setExplanationResult] =
     useState<ExplainResponse | null>(null);
-  const [analysisError, setAnalysisError] = useState<string | null>(null); // For API errors
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [squareStyles, setSquareStyles] = useState<SquareStyles>({});
   const [arrows, setArrows] = useState<Arrows>([]);
   const [moveNumberStyles, setMoveNumberStyles] = useState<MoveNumberStyles>(
     {}
   );
   const [isComputerThinking, setIsComputerThinking] = useState(false);
-  const [computerSkillLevel, setComputerSkillLevel] = useState(5); // Default skill: 5 (0-20)
-  const playerColor: "w" | "b" = "w"; // Track player color (default: white)
+  const [computerSkillLevel, setComputerSkillLevel] = useState(5);
+  const playerColor: Color = "w"; // Use Color type from chess.js
   const [gameOverMessage, setGameOverMessage] = useState<string | null>(null);
+  // --- Add this state variable ---
+  const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
+
+  // --- Refs ---
+  const boardContainerRef = useRef<HTMLDivElement>(null); // Ref for the board's container
 
   // --- Effects ---
 
@@ -71,46 +94,67 @@ function App() {
       .catch(() => setBackendStatus("error"));
   }, []);
 
-  // Basic board resizing
+  // --- Board Resizing Effect ---
   useEffect(() => {
-    const container = document.querySelector(".chessboard-container");
-    if (container) {
-      setBoardWidth(Math.min(container.clientWidth, 560));
-    }
-    // Consider adding a resize listener for dynamic updates
+    const handleResize = () => {
+      if (boardContainerRef.current) {
+        const containerWidth = boardContainerRef.current.clientWidth;
+        // Calculate width: take container width, but cap it between MIN and MAX
+        const newWidth = Math.max(
+          MIN_BOARD_WIDTH,
+          Math.min(containerWidth, MAX_BOARD_WIDTH)
+        );
+        setBoardWidth(newWidth);
+      }
+    };
+
+    // Run on mount
+    handleResize();
+
+    // Add resize listener
+    window.addEventListener("resize", handleResize);
+
+    // Cleanup listener on component unmount
+    return () => window.removeEventListener("resize", handleResize);
+  }, []); // Empty dependency array means this effect runs once on mount and cleans up on unmount
+
+  const clearVisuals = useCallback(() => {
+    setSquareStyles({});
+    setArrows([]);
+    setMoveNumberStyles({});
+    setSelectedSquare(null);
   }, []);
 
   // --- Game Logic Functions ---
 
-  // Function to safely update the game state from FEN input
-  const loadFen = useCallback((fenToLoad: string) => {
-    try {
-      const newGame = new Chess(fenToLoad);
-      setGame(newGame);
-      setFenInput(newGame.fen()); // Sync input box with loaded FEN
-      setFenLoadError(null);
-      setGameOverMessage(null); // Clear game over message
-      // Clear analysis/visuals
-      setAnalysisResult(null);
-      setExplanationResult(null);
-      setAnalysisError(null);
-      setSquareStyles({});
-      setArrows([]);
-      setMoveNumberStyles({});
-      // Reset computer thinking state if loading new FEN
-      setIsComputerThinking(false);
-      // TODO: Decide if player color should reset or be configurable
-    } catch (e) {
-      setFenLoadError("Invalid FEN string");
-    }
-  }, []);
+  const loadFen = useCallback(
+    (fenToLoad: string) => {
+      try {
+        const newGame = new Chess(fenToLoad);
+        setGame(newGame);
+        setFenInput(newGame.fen());
+        setFenLoadError(null);
+        setGameOverMessage(null);
+        setAnalysisResult(null);
+        setExplanationResult(null);
+        setAnalysisError(null);
+        setIsComputerThinking(false);
+        clearVisuals();
+      } catch (e) {
+        setFenLoadError("Invalid FEN string");
+        clearVisuals();
+      }
+    },
+    [clearVisuals]
+  );
 
-  // Handle changes in the FEN input field
   const handleFenInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const newFen = event.target.value;
     setFenInput(newFen);
+    // Attempt to load immediately or maybe add a small debounce/delay
     loadFen(newFen);
   };
+
   const checkGameOver = useCallback((currentGame: Chess) => {
     if (currentGame.isGameOver()) {
       let message = "Game Over: ";
@@ -134,27 +178,23 @@ function App() {
     return false;
   }, []);
 
-  // --- Computer Turn Trigger ---
   const triggerComputerMove = useCallback(
     async (currentGame: Chess) => {
-      if (checkGameOver(currentGame)) return; // Don't move if game ended
-      if (currentGame.turn() === playerColor) return; // Only trigger if it's computer's turn
+      if (checkGameOver(currentGame)) return;
+      if (currentGame.turn() === playerColor) return;
 
       setIsComputerThinking(true);
-      // Clear analysis from previous turn
       setAnalysisResult(null);
       setExplanationResult(null);
       setAnalysisError(null);
-      setSquareStyles({});
-      setArrows([]);
-      setMoveNumberStyles({});
+      clearVisuals();
 
       try {
         console.log("Requesting computer move...");
         const response = await fetch(
           import.meta.env.VITE_API_BASE_URL + "/api/get-computer-move",
           {
-            method: "POST", // Ensure method is POST
+            method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               fen: currentGame.fen(),
@@ -175,7 +215,6 @@ function App() {
 
         if (data.move) {
           console.log("Computer move received:", data.move);
-          // Apply computer move - IMPORTANT: use a fresh copy of the game state
           const gameAfterComputerMove = new Chess(currentGame.fen());
           const computerMoveResult = gameAfterComputerMove.move(data.move);
 
@@ -190,18 +229,17 @@ function App() {
               "Computer made an illegal move according to chess.js."
             );
           } else {
-            setGame(gameAfterComputerMove); // Update game state
-            setFenInput(gameAfterComputerMove.fen()); // Sync FEN input
+            setGame(gameAfterComputerMove);
+            setFenInput(gameAfterComputerMove.fen());
             console.log(
               "Computer move applied. New FEN:",
               gameAfterComputerMove.fen()
             );
-            checkGameOver(gameAfterComputerMove); // Check game status after computer move
+            checkGameOver(gameAfterComputerMove);
           }
         } else {
-          // Handle case where backend returns null move (e.g., stalemate already)
           console.log("Computer has no legal moves.", data.message);
-          checkGameOver(currentGame); // Re-check game status
+          checkGameOver(currentGame);
         }
       } catch (error) {
         console.error("Error during computer turn:", error);
@@ -214,13 +252,11 @@ function App() {
         setIsComputerThinking(false);
       }
     },
-    [playerColor, computerSkillLevel, checkGameOver]
+    [playerColor, computerSkillLevel, checkGameOver, clearVisuals]
   );
 
-  // Handle piece drop on the board (user making a move)
   const onPieceDrop = useCallback(
     (sourceSquare: Square, targetSquare: Square): boolean => {
-      // Prevent moves if computer is thinking, game is over, or not player's turn
       if (
         isComputerThinking ||
         game.isGameOver() ||
@@ -235,42 +271,139 @@ function App() {
         moveResult = gameCopy.move({
           from: sourceSquare,
           to: targetSquare,
-          promotion: "q", // Default promotion
+          promotion: "q",
         });
       } catch (e) {
         return false;
-      } // Should not happen with valid squares
+      }
 
-      if (moveResult === null) return false; // Illegal move
-
-      // --- User move is valid ---
-      setGame(gameCopy); // Update state immediately
-      setFenInput(gameCopy.fen()); // Sync FEN input
-      // Clear analysis/visuals
+      if (moveResult === null) {
+        // The move failed. Re-show the valid moves for the source square.
+        // This provides feedback that the drop location was invalid.
+        // Need to ensure onSquareClick is stable or included in deps if called directly.
+        // A slightly safer way without direct call:
+        setSelectedSquare(sourceSquare); // Re-set selected square
+        const moves = game.moves({ square: sourceSquare, verbose: true });
+        const newStyles: SquareStyles = {
+          [sourceSquare]: selectedPieceSquareStyle,
+        };
+        moves.forEach((move) => {
+          newStyles[move.to] = validMoveDotStyle;
+        });
+        setSquareStyles(newStyles);
+        setArrows([]);
+        setMoveNumberStyles({});
+        return false; // Indicate move failed
+      }
+      // --- User move was valid ---
+      setGame(gameCopy);
+      setFenInput(gameCopy.fen());
+      clearVisuals();
       setAnalysisResult(null);
       setExplanationResult(null);
       setAnalysisError(null);
-      setSquareStyles({});
-      setArrows([]);
-      setMoveNumberStyles({});
 
-      // Check game over *after* user move
       if (checkGameOver(gameCopy)) {
-        return true; // Game ended, don't trigger computer
+        return true;
       }
 
-      setTimeout(() => triggerComputerMove(gameCopy), 100); // 100ms delay
+      setTimeout(() => triggerComputerMove(gameCopy), 100);
 
-      return true; // Move successful
+      return true;
     },
-    [game, isComputerThinking, playerColor, triggerComputerMove, checkGameOver]
+    [
+      game,
+      isComputerThinking,
+      playerColor,
+      triggerComputerMove,
+      checkGameOver,
+      clearVisuals,
+    ]
+  );
+
+  // --- Handle clicking on a square ---
+  const onSquareClick = useCallback(
+    (square: Square) => {
+      // Don't do anything if it's not the player's turn, computer is thinking, or game over
+      if (
+        game.turn() !== playerColor ||
+        isComputerThinking ||
+        game.isGameOver()
+      ) {
+        clearVisuals(); // Clear any existing visuals if clicked out of turn/game over
+        return;
+      }
+
+      const pieceOnSquare = game.get(square);
+
+      // --- Logic for clicking a square AFTER a piece was already selected ---
+      if (selectedSquare) {
+        // If clicking the same square again, deselect
+        if (square === selectedSquare) {
+          clearVisuals();
+          return;
+        }
+
+        // Check if the clicked square is a valid move destination
+        const movesFromSelected = game.moves({
+          square: selectedSquare,
+          verbose: true,
+        });
+        const foundMove = movesFromSelected.find((move) => move.to === square);
+
+        if (foundMove) {
+          // Simulate the drop/move action if a valid destination is clicked
+          onPieceDrop(selectedSquare, square); // Use the existing drop logic
+          // onPieceDrop will handle clearing visuals after the move
+          return;
+        }
+        // If clicking another square that isn't a valid move, fall through to potentially select that square if it's the player's piece
+      }
+
+      // --- Logic for selecting a piece (or clicking empty/opponent) ---
+
+      // If clicking an empty square or opponent's piece when nothing is selected, clear visuals
+      if (!pieceOnSquare || pieceOnSquare.color !== playerColor) {
+        clearVisuals();
+        return;
+      }
+
+      // --- Player clicked their own piece (and it wasn't a move destination) ---
+      setSelectedSquare(square); // Track the selected square
+
+      // Get valid moves for the clicked piece
+      const moves = game.moves({ square: square, verbose: true });
+
+      // Create new styles: highlight selected square + dot valid moves
+      const newStyles: SquareStyles = {
+        [square]: selectedPieceSquareStyle, // Highlight the selected piece's square
+      };
+      moves.forEach((move) => {
+        // Check if the target square already has a style (e.g., from analysis)
+        // Merge styles if necessary, giving precedence to the move dot maybe?
+        // For simplicity now, just overwrite with the dot.
+        newStyles[move.to] = { ...newStyles[move.to], ...validMoveDotStyle };
+      });
+
+      // Set the styles, replacing any previous highlights/dots from analysis
+      // but keeping the selected square highlight
+      setSquareStyles(newStyles);
+      // Clear arrows/numbers from potential previous analysis
+      setArrows([]);
+      setMoveNumberStyles({});
+    },
+    [
+      game,
+      playerColor,
+      isComputerThinking,
+      selectedSquare,
+      clearVisuals,
+      onPieceDrop,
+    ] // <<< Update Dependencies
   );
 
   // --- Analysis Functions ---
-
-  // Handle the "Analyze Position" button click
   const handleAnalyzeClick = async () => {
-    // Use the current game's FEN
     const API_BASE_URL =
       import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
     const currentFen = game.fen();
@@ -283,16 +416,13 @@ function App() {
     setAnalysisResult(null);
     setExplanationResult(null);
     setAnalysisError(null);
-    setSquareStyles({});
-    setArrows([]);
-    setMoveNumberStyles({});
+    clearVisuals();
 
     try {
-      // --- Call /api/analyze ---
       const analyzeResponse = await fetch(`${API_BASE_URL}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fen: currentFen }), // Send current game FEN
+        body: JSON.stringify({ fen: currentFen }),
       });
       if (!analyzeResponse.ok) {
         const errorData = await analyzeResponse.json().catch(() => ({}));
@@ -305,12 +435,11 @@ function App() {
       const analysisData: AnalysisResponse = await analyzeResponse.json();
       setAnalysisResult(analysisData);
 
-      // --- Generate Visuals ---
       const newStyles: SquareStyles = {};
       const newArrows: Arrows = [];
       const newMoveNumbers: MoveNumberStyles = {};
       const highlightColor = "rgba(255, 255, 0, 0.4)";
-      const arrowColor = "rgb(255, 165, 0)"; // Orange arrows
+      const arrowColor = "rgb(255, 165, 0)";
 
       if (analysisData.topMoves && analysisData.topMoves.length > 0) {
         analysisData.topMoves.forEach((analysisMove, index) => {
@@ -323,7 +452,6 @@ function App() {
               newStyles[fromSquare] = { backgroundColor: highlightColor };
               newStyles[toSquare] = { backgroundColor: highlightColor };
               if (index < 3) {
-                // Only draw arrows/numbers for top 3
                 newArrows.push([fromSquare, toSquare, arrowColor]);
                 newMoveNumbers[toSquare] = index + 1;
               }
@@ -334,12 +462,10 @@ function App() {
       setSquareStyles(newStyles);
       setArrows(newArrows);
       setMoveNumberStyles(newMoveNumbers);
-      // --- End Generate Visuals ---
 
       if (!analysisData.topMoves || analysisData.topMoves.length === 0) {
         setExplanationResult(null);
       } else {
-        // --- Call /api/explain ---
         const explainResponse = await fetch(`${API_BASE_URL}/api/explain`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -355,7 +481,7 @@ function App() {
               explainResponse.statusText
             } - ${errorData?.error || "Unknown error"}`
           );
-          setExplanationResult({ explanation: "Error fetching explanation." }); // Show error in results
+          setExplanationResult({ explanation: "Error fetching explanation." });
         } else {
           const explanationData: ExplainResponse = await explainResponse.json();
           setExplanationResult(explanationData);
@@ -366,10 +492,7 @@ function App() {
       const message =
         error instanceof Error ? error.message : "Unknown analysis error";
       setAnalysisError(message);
-      // Clear visuals on error
-      setSquareStyles({});
-      setArrows([]);
-      setMoveNumberStyles({});
+      clearVisuals();
     } finally {
       setIsLoading(false);
     }
@@ -377,53 +500,62 @@ function App() {
 
   // --- Render JSX ---
   return (
-    <div className="container mx-auto p-4 max-w-4xl">
+    // Reduced padding slightly on smallest screens
+    <div className="container mx-auto p-2 sm:p-4 max-w-4xl">
       <h1 className="text-2xl font-bold mb-4 text-center">Chess Tutor</h1>
       <BackendStatus status={backendStatus} />
 
-      <div className="flex flex-col md:flex-row gap-6">
-        {" "}
-        {/* Increased gap */}
+      {/* Adjusted gap for potentially better mobile spacing */}
+      <div className="flex flex-col md:flex-row gap-4 md:gap-6">
         {/* Left side (Board, Controls, Settings) */}
-        <div className="flex-grow md:w-2/3">
+        <div className="flex-grow md:w-2/3 flex flex-col">
           {" "}
-          {/* Give board area more space */}
+          {/* Ensure this column flows */}
           <FenInput
             fen={fenInput}
             onFenChange={handleFenInputChange}
             fenError={fenLoadError}
-            isLoading={isLoading || isComputerThinking} // Disable FEN input during analysis or computer turn
+            isLoading={isLoading || isComputerThinking}
           />
-          <ChessboardDisplay
-            position={game.fen()}
-            boardWidth={boardWidth}
-            squareStyles={squareStyles}
-            arrows={arrows}
-            moveNumberStyles={moveNumberStyles}
-            onPieceDrop={onPieceDrop}
-            // Disable dragging if not player's turn, computer thinking, or game over
-            arePiecesDraggable={
-              !isComputerThinking &&
-              !game.isGameOver() &&
-              game.turn() === playerColor
-            }
-            boardOrientation={playerColor === "w" ? "white" : "black"} // Orient board to player
-          />
+          {/* --- Board Container --- */}
+          {/* Added a ref here and w-full to ensure it takes available space */}
+          {/* Added min-h-[250px] to prevent collapse before JS resize */}
+          <div
+            ref={boardContainerRef}
+            className="w-full relative my-2" // Added margin-y
+            style={{ minHeight: `${MIN_BOARD_WIDTH}px` }} // Prevent collapse
+          >
+            <ChessboardDisplay
+              // Use the calculated boardWidth state
+              boardWidth={boardWidth}
+              position={game.fen()}
+              squareStyles={squareStyles}
+              arrows={arrows}
+              moveNumberStyles={moveNumberStyles}
+              onPieceDrop={onPieceDrop}
+              onSquareClick={onSquareClick}
+              arePiecesDraggable={
+                !isComputerThinking &&
+                !game.isGameOver() &&
+                game.turn() === playerColor
+              }
+              boardOrientation={playerColor === "w" ? "white" : "black"}
+            />
+          </div>
           {/* --- Game Over Message --- */}
           {gameOverMessage && (
-            <div className="mt-4 p-3 text-center font-semibold bg-blue-100 text-blue-800 rounded border border-blue-300">
+            <div className="mt-2 mb-2 p-3 text-center font-semibold bg-blue-100 text-blue-800 rounded border border-blue-300">
               {gameOverMessage}
             </div>
           )}
           {/* --- Controls --- */}
-          <div className="mt-4 space-y-3">
+          {/* Reduced top margin slightly */}
+          <div className="mt-2 space-y-3">
             <AnalysisControls
               isLoading={isLoading}
-              // Disable analysis if computer thinking or game over
               canAnalyze={!isComputerThinking && !game.isGameOver()}
               onAnalyzeClick={handleAnalyzeClick}
             />
-            {/* --- Skill Level Slider --- */}
             <div className="pt-2">
               <Label
                 htmlFor="skillLevel"
@@ -439,22 +571,22 @@ function App() {
                 value={[computerSkillLevel]}
                 onValueChange={(value) => setComputerSkillLevel(value[0])}
                 className="mt-1"
-                disabled={isComputerThinking || isLoading} // Disable while busy
+                disabled={isComputerThinking || isLoading}
               />
             </div>
-            {/* Add buttons for New Game, Flip Board etc. later */}
           </div>
         </div>
+
         {/* Right side (Analysis Results Panel) */}
-        <div className="w-full md:w-1/3 flex-shrink-0">
-          {/* Indicate Computer Thinking */}
+        {/* Added mt-4 for spacing when stacked vertically */}
+        <div className="w-full md:w-1/3 flex-shrink-0 mt-4 md:mt-0">
           {isComputerThinking && (
             <div className="mb-3 p-2 text-center text-sm font-medium bg-gray-200 text-gray-700 rounded animate-pulse">
               Computer is thinking...
             </div>
           )}
           <AnalysisResults
-            isLoading={isLoading} // Analysis loading
+            isLoading={isLoading}
             analysisError={analysisError}
             analysisResult={analysisResult}
             explanationResult={explanationResult}
