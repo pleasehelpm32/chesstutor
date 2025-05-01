@@ -26,6 +26,15 @@ const prisma = new PrismaClient();
 const app = express();
 const port = process.env.PORT || 3001;
 
+// --- Add Logging Middleware FIRST ---
+app.use((req, res, next) => {
+  console.log(
+    `--> Request Received: ${req.method} ${req.originalUrl} - Origin: ${req.headers.origin}`
+  );
+  next(); // Pass control to the next middleware
+});
+// --- End Logging Middleware ---
+
 // --- Stockfish Engine Setup ---
 const os = require("os");
 
