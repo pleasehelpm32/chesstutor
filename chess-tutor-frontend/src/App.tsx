@@ -1,4 +1,5 @@
 // src/App.tsx
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import React, { useEffect, useState, useCallback } from "react";
 import type { CSSProperties } from "react";
 import { Chess } from "chess.js";
@@ -57,7 +58,7 @@ function App() {
   );
   const [isComputerThinking, setIsComputerThinking] = useState(false);
   const [computerSkillLevel, setComputerSkillLevel] = useState(5); // Default skill: 5 (0-20)
-  const [playerColor, setPlayerColor] = useState<"w" | "b">("w"); // Track player color (default: white)
+  const playerColor: "w" | "b" = "w"; // Track player color (default: white)
   const [gameOverMessage, setGameOverMessage] = useState<string | null>(null);
 
   // --- Effects ---
@@ -218,7 +219,7 @@ function App() {
 
   // Handle piece drop on the board (user making a move)
   const onPieceDrop = useCallback(
-    (sourceSquare: Square, targetSquare: Square, piece: string): boolean => {
+    (sourceSquare: Square, targetSquare: Square): boolean => {
       // Prevent moves if computer is thinking, game is over, or not player's turn
       if (
         isComputerThinking ||
