@@ -131,6 +131,7 @@ initializeStockfish();
 // --- End Stockfish Setup ---
 const allowedOrigins = [
   "http://localhost:5173", // Your local frontend dev URL (Vite default)
+  "https://chesslearnings.netlify.app",
   "https://chesslearnings.netlify.app/", // Your deployed frontend URL
 ];
 
@@ -140,17 +141,31 @@ const corsOptions = {
     requestOrigin: string | undefined,
     callback: (err: Error | null, allow?: boolean) => void
   ) {
-    // Allow requests with no origin OR if origin is in allowedOrigins
-    if (!requestOrigin || allowedOrigins.indexOf(requestOrigin) !== -1) {
-      callback(null, true);
+    if (!requestOrigin) {
+      // Allow requests with no origin (like curl, mobile apps)
+      return callback(null, true);
+    }
+
+    // --- Normalization Step ---
+    // Remove trailing slash from incoming origin if it exists
+    const normalizedOrigin = requestOrigin.endsWith("/")
+      ? requestOrigin.slice(0, -1)
+      : requestOrigin;
+    // --- End Normalization Step ---
+
+    // Check if the *normalized* origin is in the allowed list
+    if (allowedOrigins.indexOf(normalizedOrigin) !== -1) {
+      callback(null, true); // Origin is allowed
     } else {
-      console.error(`CORS Error: Origin ${requestOrigin} not allowed.`); // Log blocked origin
-      callback(new Error("Not allowed by CORS"));
+      console.error(
+        `CORS Error: Origin ${requestOrigin} (normalized: ${normalizedOrigin}) not allowed.`
+      );
+      callback(new Error("Not allowed by CORS")); // Origin is not allowed
     }
   },
-  methods: "GET,HEAD,PUT,PATCH,POST,DELETE", // Explicitly allow POST
-  preflightContinue: false, // Let CORS handle OPTIONS fully
-  optionsSuccessStatus: 204, // Standard for OPTIONS response
+  methods: "GET,HEAD,PUT,PATCH,POST,DELETE", // Explicitly allow methods
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
 };
 
 // Apply CORS middleware globally BEFORE routes
