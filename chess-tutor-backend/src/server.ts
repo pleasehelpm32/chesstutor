@@ -27,8 +27,21 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // --- Stockfish Engine Setup ---
-const stockfishPath =
-  process.env.STOCKFISH_PATH || path.join(__dirname, "../bin/stockfish");
+const os = require("os");
+
+function getStockfishPath() {
+  const platform = os.platform();
+  if (platform === "darwin") {
+    return path.join(__dirname, "../bin/stockfish-mac");
+  } else if (platform === "linux") {
+    return path.join(__dirname, "../bin/stockfish-linux");
+  } else {
+    // Default fallback
+    return path.join(__dirname, "../bin/stockfish");
+  }
+}
+
+const stockfishPath = process.env.STOCKFISH_PATH || getStockfishPath();
 
 let engineProcess: ChildProcessWithoutNullStreams | null = null;
 let isEngineReady = false;
@@ -115,11 +128,10 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps or curl requests)
       if (!origin) return callback(null, true);
       if (allowedOrigins.indexOf(origin) === -1) {
-        const msg =
-          "The CORS policy for this site does not allow access from the specified Origin.";
+        const msg = `CORS policy does not allow access from origin: ${origin}`;
+        console.error(msg); // Log the blocked origin for debugging
         return callback(new Error(msg), false);
       }
       return callback(null, true);
@@ -342,6 +354,50 @@ app.post("/api/explain", (async (req: Request, res: Response) => {
   const movesToExplain = topMoves.slice(0, 3);
   // --- End Validation ---
 
+  // --- Pre-computation using Chess.js ---
+  let gameInstance: Chess | null = null;
+  try {
+    gameInstance = new Chess(fen);
+  } catch (e) {
+    console.error(`Explain endpoint: Invalid FEN received: ${fen}`, e);
+    return res.status(400).json({ error: "Invalid FEN string provided." });
+  }
+
+  // Use movesToExplain which is already sliced
+  const enrichedMoves = movesToExplain.map((moveObj) => {
+    const moveString = moveObj.move;
+    const startSquare = moveString.substring(0, 2);
+    const endSquare = moveString.substring(2, 4);
+    const pieceData = gameInstance?.get(startSquare); // Get piece info { type: 'p', color: 'w' }
+
+    // Map piece type codes to full names
+    const pieceTypeMap: { [key: string]: string } = {
+      p: "Pawn",
+      n: "Knight",
+      b: "Bishop",
+      r: "Rook",
+      q: "Queen",
+      k: "King",
+    };
+    const pieceType = pieceData
+      ? pieceTypeMap[pieceData.type]
+      : "Unknown Piece";
+    const pieceColor = pieceData
+      ? pieceData.color === "w"
+        ? "White"
+        : "Black"
+      : "Unknown Color";
+
+    return {
+      ...moveObj, // Includes move: string, isCheckmate: boolean
+      startSquare,
+      endSquare,
+      pieceType,
+      pieceColor,
+    };
+  });
+  // --- End Pre-computation ---
+
   // --- Cache Lookup ---
   const cacheCutoffDate = subDays(new Date(), CACHE_DURATION_DAYS); // Calculate date 7 days ago
 
@@ -392,11 +448,12 @@ app.post("/api/explain", (async (req: Request, res: Response) => {
   console.log(`OpenAI call for FEN: ${fen}, Moves data:`, movesToExplain);
 
   // Find if there's a checkmating move
-  const checkmatingMove = movesToExplain.find((m) => m.isCheckmate);
+  const checkmatingMove = enrichedMoves.find((m) => m.isCheckmate);
 
   // --- Construct Conditional Prompt ---
   let prompt = "";
-  const moveListForPrompt = movesToExplain
+  // Use enrichedMoves for the list shown to the LLM
+  const moveListForPrompt = enrichedMoves
     .map(
       (m, index) =>
         `${index + 1}. ${m.move}${m.isCheckmate ? " (Checkmate!)" : ""}`
@@ -404,61 +461,83 @@ app.post("/api/explain", (async (req: Request, res: Response) => {
     .join("\n");
 
   if (checkmatingMove) {
-    // --- Prompt for when CHECKMATE is found ---
-    const otherMoves = movesToExplain.filter((m) => !m.isCheckmate);
-    let otherMovesExplanation = "";
-    if (otherMoves.length > 0) {
-      otherMovesExplanation = `\n*   **Other options (${otherMoves
-        .map((m) => m.move)
-        .join(
-          ", "
-        )}):** Briefly explain the idea behind these moves (1 sentence each), but state clearly they are inferior because they don't deliver the immediate win.`;
-    }
-
-    prompt = `You are an expert and friendly chess tutor explaining a critical game-winning move to a beginner student.
-
-Analyze the following chess position given in FEN notation:
-${fen}
-
-Stockfish identifies the following top moves:
-${moveListForPrompt}
-
-**CRITICAL ACTION REQUIRED: The move ${checkmatingMove.move} delivers CHECKMATE and wins the game immediately!** This is the most important move by far.
-
-Please explain the moves like this:
-*   **${checkmatingMove.move} (CHECKMATE):** **Emphasize that this move delivers checkmate and instantly wins.** Explain *how* it checkmates (e.g., "attacks the king which has no escape squares and cannot be blocked or captured"). Make this explanation the primary focus.${otherMovesExplanation}
-
-Prioritize explaining the checkmate clearly and urgently.`;
-  } else {
-    // --- Prompt for when NO checkmate is found ---
-    const moveExamples = movesToExplain
+    // --- Prompt for CHECKMATE (V5 - No Piece Line for Other Moves) ---
+    const otherMoves = enrichedMoves.filter((m) => !m.isCheckmate);
+    // Remove explicit piece identification from other moves explanation format
+    const otherMovesFormat = otherMoves
       .map(
         (m) =>
-          `*   **${m.move}:** [Explanation focusing on the key idea for ${m.move}]`
+          `*   **${m.move}:** Moving from ${m.startSquare} to ${m.endSquare}. [1 sentence idea], but this is **inferior** as it doesn't deliver checkmate.`
       )
       .join("\n");
 
-    prompt = `You are an expert and friendly chess tutor explaining Stockfish's top move suggestions to a beginner student.
+    prompt = `You are a factual chess analysis engine. Provide ONLY the requested analysis, formatted EXACTLY as specified. NO introductory or concluding remarks.
 
-Analyze the following chess position given in FEN notation:
-${fen}
+**Input Data:**
+*   **FEN:** ${fen}
+*   **Stockfish Top Moves:** ${moveListForPrompt}
+*   **Checkmating Move Details:** Move: ${checkmatingMove.move}, Piece: ${checkmatingMove.pieceColor} ${checkmatingMove.pieceType}, Start: ${checkmatingMove.startSquare}, End: ${checkmatingMove.endSquare}
 
-Stockfish identifies the following top moves as strong options (none are immediate checkmate):
-${moveListForPrompt}
+**Analysis Task:** Explain the provided moves using the pre-identified piece information.
 
-For **each** of these moves, briefly explain (1-2 sentences) the main strategic or tactical idea behind it, using simple terms. Consider concepts like center control, piece development, threats, king safety, and pawn structure where relevant.
+**CRITICAL ALERT: Move ${checkmatingMove.move} delivers CHECKMATE!**
 
-Please format your response clearly, addressing each move separately, like this example:
-${moveExamples}
+**Required Output Format (Use Markdown, EXACTLY as shown):**
+*   **${checkmatingMove.move} (CHECKMATE!):** The **${checkmatingMove.pieceColor} ${checkmatingMove.pieceType}** on **${checkmatingMove.startSquare}** moves to **${checkmatingMove.endSquare}**. This delivers checkmate because [Explain HOW this specific piece's move attacks the king and why the king cannot escape, block, or capture]. This move wins the game immediately.
+${otherMovesFormat}
 
-Keep the explanations concise and focused on the most important immediate benefit for a beginner to understand for each move.`;
+**Constraints:**
+1.  Output ONLY the bulleted list, starting directly with the first bullet.
+2.  Use the PRE-PROVIDED piece type, color, start, and end squares in your descriptions for the checkmating move. Do NOT output explicit piece info for other moves. Do NOT derive piece info from the FEN yourself.
+3.  Focus explanations ONLY on the immediate impact. No general plans unless directly relevant.
+4.  No conversational filler. Adhere precisely to the format.`;
+  } else {
+    // --- Prompt for NO checkmate (V5 - No Piece Line) ---
+    // Remove the "Piece:" line from the format string
+    const moveExamplesFormat = enrichedMoves
+      .map(
+        (m) => `*   **${m.move}:**
+    *   **Idea:** [1-2 sentence explanation of the move's main strategic/tactical purpose, considering it's the ${m.pieceColor} ${m.pieceType} moving from ${m.startSquare} to ${m.endSquare}].
+    *   **Opportunities Created:** [List immediate checks, attacks, setups, key squares controlled. If none apparent, state "None apparent."].
+    *   **Threats Addressed:** [Does move defend, block, or counter? If none apparent, state "None apparent."].`
+      )
+      .join("\n\n"); // Use double newline for better separation
+
+    // Include the enriched move list in the Input Data section for clarity
+    const enrichedMoveListInData = enrichedMoves
+      .map(
+        (m, i) =>
+          `    ${i + 1}. ${m.move} (${m.pieceColor} ${m.pieceType} from ${
+            m.startSquare
+          } to ${m.endSquare})`
+      )
+      .join("\n");
+
+    prompt = `You are a factual chess analysis engine. Provide ONLY the requested analysis, formatted EXACTLY as specified. NO introductory or concluding remarks.
+
+**Input Data:**
+*   **FEN:** ${fen}
+*   **Stockfish Top Moves (with piece info):**
+${enrichedMoveListInData}
+
+**Analysis Task:** For EACH move listed above, provide a detailed breakdown using the pre-identified piece information.
+
+**Required Output Format (Use Markdown, EXACTLY as shown for EACH move):**
+${moveExamplesFormat}
+
+**Constraints:**
+1.  Output ONLY the bulleted list analysis for each move, starting directly with the first bullet point for the first move.
+2.  Base your 'Idea' explanation on the PRE-PROVIDED piece type, color, start, and end squares. Do NOT output a separate 'Piece:' line.
+3.  Focus explanations ONLY on the immediate impact. No general plans unless directly relevant.
+4.  Explicitly address "Opportunities Created" and "Threats Addressed", stating "None apparent." if applicable.
+5.  No conversational filler. Adhere precisely to the format.`;
   }
   // --- End Prompt Construction ---
 
   try {
     console.log("Sending request to OpenAI...");
-    const maxTokens = checkmatingMove ? 200 : 250; // Adjust tokens based on prompt type
-    const temperature = checkmatingMove ? 0.4 : 0.5; // Adjust temp based on prompt type
+    const maxTokens = checkmatingMove ? 200 : 300; // Adjust tokens based on prompt type
+    const temperature = checkmatingMove ? 0.3 : 0.4; // Adjust temp based on prompt type
 
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo", // Or "gpt-4o-mini" etc.
@@ -520,6 +599,121 @@ Keep the explanations concise and focused on the most important immediate benefi
   }
 }) as RequestHandler);
 // --- End Explain Endpoint ---
+
+// --- NEW: Computer Move Endpoint ---
+const MIN_SKILL_LEVEL = 0;
+const MAX_SKILL_LEVEL = 20;
+const BASE_MOVE_TIME_MS = 100; // Minimum thinking time
+const MAX_ADDITIONAL_TIME_MS = 1000; // Max time added based on skill
+
+// Helper function to get a move from Stockfish at a specific skill level
+const getStockfishMove = (
+  fen: string,
+  skillLevel: number
+): Promise<string | null> => {
+  return new Promise((resolve, reject) => {
+    if (!engineProcess || !isEngineReady) {
+      return reject(new Error("Stockfish process not ready or available."));
+    }
+
+    let moveOutput = "";
+    let bestMoveFound: string | null = null;
+
+    // Calculate move time based on skill level (simple linear scaling)
+    const normalizedSkill = Math.max(
+      0,
+      Math.min(1, skillLevel / MAX_SKILL_LEVEL)
+    ); // 0 to 1
+    const moveTime =
+      BASE_MOVE_TIME_MS + Math.round(normalizedSkill * MAX_ADDITIONAL_TIME_MS);
+    const moveTimeout = moveTime + 5000; // Add buffer for processing/communication
+
+    console.log(
+      `Requesting move for FEN: ${fen}, Skill: ${skillLevel}, MoveTime: ${moveTime}ms`
+    );
+
+    const timeoutId = setTimeout(() => {
+      console.error(
+        `Stockfish move calculation timed out after ${moveTimeout}ms.`
+      );
+      cleanup();
+      sendCommand("stop"); // Try to stop calculation
+      reject(new Error("Stockfish move calculation timed out."));
+    }, moveTimeout);
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      engineProcess?.stdout.removeListener("data", dataHandler);
+    };
+
+    const dataHandler = (data: Buffer) => {
+      moveOutput += data.toString();
+      const lines = moveOutput.split("\n");
+      moveOutput = lines.pop() || ""; // Keep partial line
+
+      for (const line of lines) {
+        if (line.startsWith("bestmove")) {
+          const move = line.split(" ")[1];
+          bestMoveFound = move && move !== "(none)" ? move : null;
+          console.log(`Stockfish bestmove found: ${bestMoveFound}`);
+          cleanup();
+          resolve(bestMoveFound); // Resolve with the found move (or null)
+          return; // Exit loop
+        }
+      }
+    };
+
+    engineProcess.stdout.on("data", dataHandler);
+
+    // Send commands to get one move
+    sendCommand(`position fen ${fen}`);
+    sendCommand(`setoption name Skill Level value ${skillLevel}`);
+    sendCommand(`go movetime ${moveTime}`);
+  });
+};
+
+app.post("/api/get-computer-move", (async (req: Request, res: Response) => {
+  const { fen, skillLevel } = req.body;
+
+  // --- Input Validation ---
+  if (!fen || typeof fen !== "string") {
+    return res.status(400).json({ error: "Missing or invalid FEN string." });
+  }
+  const skill = Number(skillLevel);
+  if (isNaN(skill) || skill < MIN_SKILL_LEVEL || skill > MAX_SKILL_LEVEL) {
+    return res.status(400).json({
+      error: `Invalid skill level. Must be between ${MIN_SKILL_LEVEL} and ${MAX_SKILL_LEVEL}.`,
+    });
+  }
+  // --- End Validation ---
+
+  if (!engineProcess || !isEngineReady) {
+    console.error("Get computer move request failed: Engine not ready.");
+    return res.status(503).json({ error: "Stockfish engine not ready." });
+  }
+
+  try {
+    const bestMove = await getStockfishMove(fen, skill);
+
+    if (bestMove) {
+      res.json({ move: bestMove });
+    } else {
+      // This might happen if Stockfish is in a state where it has no legal moves (e.g., stalemate/checkmate already)
+      console.warn(`Stockfish returned no valid move for FEN: ${fen}`);
+      res
+        .status(200)
+        .json({ move: null, message: "No legal moves found by engine." });
+    }
+  } catch (error) {
+    console.error(`Failed to get computer move for FEN: ${fen}`, error);
+    const message =
+      error instanceof Error ? error.message : "Unknown engine error";
+    res
+      .status(500)
+      .json({ error: "Failed to get computer move.", details: message });
+  }
+}) as RequestHandler);
+// --- End Computer Move Endpoint ---
 
 // --- Server Listen ---
 app.listen(port, () => {

@@ -10,6 +10,8 @@ import FenInput from "./components/FenInput";
 import ChessboardDisplay from "./components/ChessboardDisplay";
 import AnalysisControls from "./components/AnalysisControls";
 import AnalysisResults from "./components/AnalysisResults";
+import { Label } from "./components/ui/label";
+import { Slider } from "./components/ui/slider";
 
 // --- Define Types ---
 interface AnalysisMove {
@@ -22,6 +24,11 @@ interface AnalysisResponse {
 interface ExplainResponse {
   explanation: string;
 }
+interface ComputerMoveResponse {
+  move: string | null; // Can be null if no move found
+  message?: string;
+}
+
 type SquareStyles = { [square: string]: CSSProperties };
 type Arrows = Array<[string, string, string?]>;
 type MoveNumberStyles = { [square: string]: number };
@@ -48,6 +55,10 @@ function App() {
   const [moveNumberStyles, setMoveNumberStyles] = useState<MoveNumberStyles>(
     {}
   );
+  const [isComputerThinking, setIsComputerThinking] = useState(false);
+  const [computerSkillLevel, setComputerSkillLevel] = useState(5); // Default skill: 5 (0-20)
+  const [playerColor, setPlayerColor] = useState<"w" | "b">("w"); // Track player color (default: white)
+  const [gameOverMessage, setGameOverMessage] = useState<string | null>(null);
 
   // --- Effects ---
 
@@ -73,60 +84,63 @@ function App() {
   // Function to safely update the game state from FEN input
   const loadFen = useCallback((fenToLoad: string) => {
     try {
-      const newGame = new Chess(fenToLoad); // Validate FEN by creating instance
-      setGame(newGame); // Update game state
-      setFenLoadError(null); // Clear any previous loading error
-      // Clear analysis visuals when loading a new FEN manually
+      const newGame = new Chess(fenToLoad);
+      setGame(newGame);
+      setFenInput(newGame.fen()); // Sync input box with loaded FEN
+      setFenLoadError(null);
+      setGameOverMessage(null); // Clear game over message
+      // Clear analysis/visuals
       setAnalysisResult(null);
       setExplanationResult(null);
       setAnalysisError(null);
       setSquareStyles({});
       setArrows([]);
       setMoveNumberStyles({});
+      // Reset computer thinking state if loading new FEN
+      setIsComputerThinking(false);
+      // TODO: Decide if player color should reset or be configurable
     } catch (e) {
-      setFenLoadError("Invalid FEN string"); // Set error if FEN is invalid
+      setFenLoadError("Invalid FEN string");
     }
-  }, []); // No dependencies, this function is stable
+  }, []);
 
   // Handle changes in the FEN input field
   const handleFenInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const newFen = event.target.value;
-    setFenInput(newFen); // Update the input box value
-    // Attempt to load the FEN immediately for validation feedback
+    setFenInput(newFen);
     loadFen(newFen);
   };
-
-  // Handle piece drop on the board (user making a move)
-  const onPieceDrop = useCallback(
-    (sourceSquare: Square, targetSquare: Square): boolean => {
-      // Prevent moves if analysis is loading
-      if (isLoading) return false;
-
-      // Create a copy of the game to test the move
-      const gameCopy = new Chess(game.fen());
-      let moveResult = null;
-
-      try {
-        moveResult = gameCopy.move({
-          from: sourceSquare,
-          to: targetSquare,
-          promotion: "q", // Default to queen promotion for simplicity
-        });
-      } catch (e) {
-        // Catch errors from invalid move format (less likely with react-chessboard)
-        console.error("Error making move:", e);
-        return false; // Indicate illegal move
+  const checkGameOver = useCallback((currentGame: Chess) => {
+    if (currentGame.isGameOver()) {
+      let message = "Game Over: ";
+      if (currentGame.isCheckmate()) {
+        message += `Checkmate! ${
+          currentGame.turn() === "w" ? "Black" : "White"
+        } wins.`;
+      } else if (currentGame.isStalemate()) {
+        message += "Stalemate (Draw).";
+      } else if (currentGame.isThreefoldRepetition()) {
+        message += "Draw by Threefold Repetition.";
+      } else if (currentGame.isInsufficientMaterial()) {
+        message += "Draw by Insufficient Material.";
+      } else if (currentGame.isDraw()) {
+        message += "Draw by 50-move rule.";
       }
+      setGameOverMessage(message);
+      return true;
+    }
+    setGameOverMessage(null);
+    return false;
+  }, []);
 
-      // If move is illegal chess.js returns null
-      if (moveResult === null) {
-        return false; // Snap piece back
-      }
+  // --- Computer Turn Trigger ---
+  const triggerComputerMove = useCallback(
+    async (currentGame: Chess) => {
+      if (checkGameOver(currentGame)) return; // Don't move if game ended
+      if (currentGame.turn() === playerColor) return; // Only trigger if it's computer's turn
 
-      // Move is legal, update the main game state
-      setGame(gameCopy);
-
-      // Clear previous analysis/explanation after a valid move
+      setIsComputerThinking(true);
+      // Clear analysis from previous turn
       setAnalysisResult(null);
       setExplanationResult(null);
       setAnalysisError(null);
@@ -134,11 +148,121 @@ function App() {
       setArrows([]);
       setMoveNumberStyles({});
 
-      // TODO: Trigger computer move logic here in Phase B
+      try {
+        console.log("Requesting computer move...");
+        const response = await fetch(
+          "http://localhost:3001/api/get-computer-move",
+          {
+            method: "POST", // Ensure method is POST
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              fen: currentGame.fen(),
+              skillLevel: computerSkillLevel,
+            }),
+          }
+        );
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(
+            `Computer move API failed: ${response.status} - ${
+              errorData?.error || "Unknown error"
+            }`
+          );
+        }
+
+        const data: ComputerMoveResponse = await response.json();
+
+        if (data.move) {
+          console.log("Computer move received:", data.move);
+          // Apply computer move - IMPORTANT: use a fresh copy of the game state
+          const gameAfterComputerMove = new Chess(currentGame.fen());
+          const computerMoveResult = gameAfterComputerMove.move(data.move);
+
+          if (computerMoveResult === null) {
+            console.error(
+              "!!! ERROR: Computer returned an illegal move:",
+              data.move,
+              "FEN:",
+              currentGame.fen()
+            );
+            throw new Error(
+              "Computer made an illegal move according to chess.js."
+            );
+          } else {
+            setGame(gameAfterComputerMove); // Update game state
+            setFenInput(gameAfterComputerMove.fen()); // Sync FEN input
+            console.log(
+              "Computer move applied. New FEN:",
+              gameAfterComputerMove.fen()
+            );
+            checkGameOver(gameAfterComputerMove); // Check game status after computer move
+          }
+        } else {
+          // Handle case where backend returns null move (e.g., stalemate already)
+          console.log("Computer has no legal moves.", data.message);
+          checkGameOver(currentGame); // Re-check game status
+        }
+      } catch (error) {
+        console.error("Error during computer turn:", error);
+        setAnalysisError(
+          `Computer turn failed: ${
+            error instanceof Error ? error.message : "Unknown error"
+          }`
+        );
+      } finally {
+        setIsComputerThinking(false);
+      }
+    },
+    [playerColor, computerSkillLevel, checkGameOver]
+  );
+
+  // Handle piece drop on the board (user making a move)
+  const onPieceDrop = useCallback(
+    (sourceSquare: Square, targetSquare: Square, piece: string): boolean => {
+      // Prevent moves if computer is thinking, game is over, or not player's turn
+      if (
+        isComputerThinking ||
+        game.isGameOver() ||
+        game.turn() !== playerColor
+      ) {
+        return false;
+      }
+
+      const gameCopy = new Chess(game.fen());
+      let moveResult = null;
+      try {
+        moveResult = gameCopy.move({
+          from: sourceSquare,
+          to: targetSquare,
+          promotion: "q", // Default promotion
+        });
+      } catch (e) {
+        return false;
+      } // Should not happen with valid squares
+
+      if (moveResult === null) return false; // Illegal move
+
+      // --- User move is valid ---
+      setGame(gameCopy); // Update state immediately
+      setFenInput(gameCopy.fen()); // Sync FEN input
+      // Clear analysis/visuals
+      setAnalysisResult(null);
+      setExplanationResult(null);
+      setAnalysisError(null);
+      setSquareStyles({});
+      setArrows([]);
+      setMoveNumberStyles({});
+
+      // Check game over *after* user move
+      if (checkGameOver(gameCopy)) {
+        return true; // Game ended, don't trigger computer
+      }
+
+      setTimeout(() => triggerComputerMove(gameCopy), 100); // 100ms delay
 
       return true; // Move successful
     },
-    [game, isLoading] // Depend on game state and loading status
+    [game, isComputerThinking, playerColor, triggerComputerMove, checkGameOver]
   );
 
   // --- Analysis Functions ---
@@ -253,51 +377,84 @@ function App() {
   // --- Render JSX ---
   return (
     <div className="container mx-auto p-4 max-w-4xl">
-      {" "}
-      {/* Increased max-width slightly */}
       <h1 className="text-2xl font-bold mb-4 text-center">Chess Tutor</h1>
       <BackendStatus status={backendStatus} />
-      {/* Use flex layout for board and potential side panel later */}
-      <div className="flex flex-col md:flex-row gap-4">
-        {/* Left side (Board and Controls) */}
-        <div className="flex-grow">
+
+      <div className="flex flex-col md:flex-row gap-6">
+        {" "}
+        {/* Increased gap */}
+        {/* Left side (Board, Controls, Settings) */}
+        <div className="flex-grow md:w-2/3">
+          {" "}
+          {/* Give board area more space */}
           <FenInput
-            // Use fenInput for display, but loadFen handles validation/update
             fen={fenInput}
             onFenChange={handleFenInputChange}
-            fenError={fenLoadError} // Show loading errors here
-            isLoading={isLoading} // Disable while analyzing
+            fenError={fenLoadError}
+            isLoading={isLoading || isComputerThinking} // Disable FEN input during analysis or computer turn
           />
-
           <ChessboardDisplay
-            // Pass current game FEN to the board
             position={game.fen()}
-            // isValidFen is implicitly true if game object exists
             boardWidth={boardWidth}
             squareStyles={squareStyles}
             arrows={arrows}
             moveNumberStyles={moveNumberStyles}
-            // Add the drop handler
             onPieceDrop={onPieceDrop}
-            // Enable dragging
-            arePiecesDraggable={true}
-            // Determine board orientation based on whose turn (optional)
-            boardOrientation={game.turn() === "w" ? "white" : "black"}
+            // Disable dragging if not player's turn, computer thinking, or game over
+            arePiecesDraggable={
+              !isComputerThinking &&
+              !game.isGameOver() &&
+              game.turn() === playerColor
+            }
+            boardOrientation={playerColor === "w" ? "white" : "black"} // Orient board to player
           />
-
-          <AnalysisControls
-            isLoading={isLoading}
-            // Disable analysis if game is over
-            canAnalyze={!game.isGameOver()} // Use game state instead of isValidFen
-            onAnalyzeClick={handleAnalyzeClick}
-          />
+          {/* --- Game Over Message --- */}
+          {gameOverMessage && (
+            <div className="mt-4 p-3 text-center font-semibold bg-blue-100 text-blue-800 rounded border border-blue-300">
+              {gameOverMessage}
+            </div>
+          )}
+          {/* --- Controls --- */}
+          <div className="mt-4 space-y-3">
+            <AnalysisControls
+              isLoading={isLoading}
+              // Disable analysis if computer thinking or game over
+              canAnalyze={!isComputerThinking && !game.isGameOver()}
+              onAnalyzeClick={handleAnalyzeClick}
+            />
+            {/* --- Skill Level Slider --- */}
+            <div className="pt-2">
+              <Label
+                htmlFor="skillLevel"
+                className="text-sm font-medium text-gray-700"
+              >
+                Computer Skill Level: {computerSkillLevel}
+              </Label>
+              <Slider
+                id="skillLevel"
+                min={0}
+                max={20}
+                step={1}
+                value={[computerSkillLevel]}
+                onValueChange={(value) => setComputerSkillLevel(value[0])}
+                className="mt-1"
+                disabled={isComputerThinking || isLoading} // Disable while busy
+              />
+            </div>
+            {/* Add buttons for New Game, Flip Board etc. later */}
+          </div>
         </div>
-
-        {/* Right side (Analysis Results - can become side panel) */}
+        {/* Right side (Analysis Results Panel) */}
         <div className="w-full md:w-1/3 flex-shrink-0">
+          {/* Indicate Computer Thinking */}
+          {isComputerThinking && (
+            <div className="mb-3 p-2 text-center text-sm font-medium bg-gray-200 text-gray-700 rounded animate-pulse">
+              Computer is thinking...
+            </div>
+          )}
           <AnalysisResults
-            isLoading={isLoading}
-            analysisError={analysisError} // Show API errors here
+            isLoading={isLoading} // Analysis loading
+            analysisError={analysisError}
             analysisResult={analysisResult}
             explanationResult={explanationResult}
           />
