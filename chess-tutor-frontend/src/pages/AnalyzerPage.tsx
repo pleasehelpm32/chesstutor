@@ -6,7 +6,8 @@ import { Chess } from "chess.js";
 import type { Square, Color } from "chess.js";
 
 // Adjust component import paths relative to the 'pages' directory
-import BackendStatus from "../components/BackendStatus";
+
+// import BackendStatus from "../components/BackendStatus";
 import FenInput from "../components/FenInput";
 import ChessboardDisplay from "../components/ChessboardDisplay";
 import AnalysisControls from "../components/AnalysisControls";
@@ -59,7 +60,7 @@ const MIN_BOARD_WIDTH = 250;
 // Rename function to AnalyzerPage
 function AnalyzerPage() {
   // --- State Variables ---
-  const [backendStatus, setBackendStatus] = useState("checking...");
+  const [_backendStatus, setBackendStatus] = useState("checking...");
   const [game, setGame] = useState(() => new Chess());
   const [fenInput, setFenInput] = useState(game.fen());
   const [fenLoadError, setFenLoadError] = useState<string | null>(null);
