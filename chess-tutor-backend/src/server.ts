@@ -11,7 +11,7 @@ import miscRoutes from "./routes/misc"; // Router for /health, /test-db
 import analyzeRoutes from "./routes/analyze"; // Router for /analyze
 import explainRoutes from "./routes/explain"; // Router for /explain
 import computerMoveRoutes from "./routes/computerMove";
-// Router for /computerMove
+import puzzleRoutes from "./routes/puzzles"; // Router for /puzzle
 // Load environment variables (.env file)
 dotenv.config();
 
@@ -33,9 +33,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // 2. CORS Configuration
 const allowedOrigins = [
   "http://localhost:5173", // Vite default dev URL
-  "https://chesslearnings.netlify.app", // Your deployed frontend URL
+  "https://chesslearnings.netlify.app",
+  "https://hoppscotch.io", // For API testing
   // Add any other origins you need to allow
 ];
+// src/server.ts
+// ...
 const corsOptions = {
   origin: function (
     requestOrigin: string | undefined,
@@ -43,12 +46,12 @@ const corsOptions = {
   ) {
     // Allow requests with no origin OR origins in the allowed list
     if (
-      !requestOrigin ||
-      allowedOrigins.some((origin) => requestOrigin.startsWith(origin))
+      !requestOrigin || // This allows curl, Postman desktop, etc.
+      allowedOrigins.some((origin) => requestOrigin.startsWith(origin)) // Problem might be here
     ) {
       callback(null, true);
     } else {
-      console.error(`CORS Error: Origin ${requestOrigin} not allowed.`);
+      console.error(`CORS Error: Origin ${requestOrigin} not allowed.`); // This is being hit
       callback(new Error("Not allowed by CORS"));
     }
   },
@@ -66,11 +69,21 @@ app.use("/api", miscRoutes); // Mounts /api/health, /api/test-db
 app.use("/api/analyze", analyzeRoutes); // Mounts /api/analyze
 app.use("/api/explain", explainRoutes); // Mounts /api/explain
 app.use("/api/computerMove", computerMoveRoutes); // Mounts /api/computerMove
-// --- Catch-all for undefined API routes (Optional) ---
-// app.use("/api/*", (req: Request, res: Response) => {
-//   res.status(404).json({ error: "API route not found." });
-// });
+app.use("/api/puzzles", puzzleRoutes); // Mounts /api/puzzles
 
+// --- TEMPORARY DEBUGGING ---
+if (puzzleRoutes && puzzleRoutes.stack) {
+  console.log("--- Routes registered under /api/puzzles ---");
+  puzzleRoutes.stack.forEach(function (r: any) {
+    if (r.route && r.route.path) {
+      console.log(r.route.path, Object.keys(r.route.methods));
+    }
+  });
+  console.log("-----------------------------------------");
+} else {
+  console.log("--- puzzleRoutes is undefined or has no stack ---");
+}
+// --- END TEMPORARY DEBUGGING ---
 // --- Central Error Handling Middleware ---
 // IMPORTANT: This must be added *after* all your routes
 app.use(basicErrorHandler);

@@ -21,6 +21,14 @@ interface HealthResponse {
   timestamp: string;
 }
 
+interface PuzzleData {
+  id: string;
+  fen: string;
+  solutionMoves: string[];
+  theme: string;
+  rating?: number;
+}
+
 // Get base URL from environment variable
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
@@ -106,9 +114,20 @@ export const getExplanation = async (
 /**
  * Gets the computer's next move for a given position and skill level.
  * @param fen - The FEN string of the position.
+ * @param theme - The puzzle theme (e.g., "mateIn2").
+ *  @returns Promise resolving to the puzzle data.
  * @param skillLevel - The desired computer skill level (0-20).
  * @returns Promise resolving to the computer move response.
  */
+
+export const getRandomPuzzle = async (theme: string): Promise<PuzzleData> => {
+  const url = `${API_BASE_URL}/api/puzzles/random?theme=${encodeURIComponent(
+    theme
+  )}`;
+  console.log("Attempting to fetch getRandomPuzzle from:", url); // <-- ADD THIS LOG
+  const response = await fetch(url); // Removed method: 'GET' is default
+  return handleResponse<PuzzleData>(response);
+};
 export const getComputerMove = async (
   fen: string,
   skillLevel: number

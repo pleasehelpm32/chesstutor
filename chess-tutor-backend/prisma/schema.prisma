@@ -28,3 +28,18 @@ model Analysis {
 }
 
 // You can add more models here later, each starting with 'model ModelName { ... }'
+
+model Puzzle {
+  id            String   @id @default(uuid())
+  lichessPuzzleId   String?
+  fen           String   @unique // Starting position of the puzzle
+  solutionMoves String[] // Array of moves in SAN or UCI, e.g., ["e4", "e5", "Nf3"]
+  theme         String   // e.g., "mateIn2", "mateIn3", "fork", "pin"
+  rating        Int?     // Optional puzzle rating
+  source        String?  // Optional: where the puzzle came from
+  createdAt     DateTime @default(now())
+
+  @@index([theme])
+  @@index([rating])
+  @@index([lichessPuzzleId])
+}
