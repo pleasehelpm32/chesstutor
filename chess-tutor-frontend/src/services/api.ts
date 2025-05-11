@@ -23,6 +23,7 @@ interface HealthResponse {
 
 interface PuzzleData {
   id: string;
+  puzzleId: string;
   fen: string;
   solutionMoves: string[];
   theme: string;

@@ -15,18 +15,19 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getRandomPuzzle } from "../services/api";
 import type { CSSProperties } from "react";
+import { Lightbulb } from "lucide-react";
 
 // --- Types ---
 interface Puzzle {
-  id: string;
+  id: string; // Prisma's internal UUID
+  puzzleId: string | null; // The Lichess PuzzleId
   fen: string;
   solutionMoves: string[];
   theme: string;
   rating?: number;
-  puzzleId?: string;
 }
 
-// interface ExplainResponse {
+// interface ExplainResponse { // Not used directly in this component yet
 //   explanation: string;
 //   cacheHit?: boolean;
 // }
@@ -44,7 +45,7 @@ type PuzzleStatus =
   | "error";
 
 type SquareStyles = { [square: string]: CSSProperties };
-type Arrows = Array<[string, string, string?]>; // [from, to, color?]
+type Arrows = Array<[string, string, string?]>;
 
 const MATE_THEMES = [
   { value: "mateIn1", label: "Mate in 1" },
@@ -79,7 +80,8 @@ const PuzzlePage: React.FC = () => {
   const [arrows, setArrows] = useState<Arrows>([]);
   const [boardWidth, setBoardWidth] = useState(MIN_BOARD_WIDTH);
   const [playerToMove, setPlayerToMove] = useState<Color>("w");
-  const [hintShown, setHintShown] = useState(false); // For hint button
+  const [hintShown, setHintShown] = useState(false);
+  const [selectedSquare, setSelectedSquare] = useState<Square | null>(null); // For click-to-move
 
   // --- Refs ---
   const boardContainerRef = useRef<HTMLDivElement>(null);
@@ -87,7 +89,8 @@ const PuzzlePage: React.FC = () => {
   // --- Callbacks & Helper Functions ---
   const clearBoardVisuals = useCallback(() => {
     setSquareStyles({});
-    setArrows([]); // Also clear hint arrows
+    setArrows([]);
+    // setSelectedSquare(null); // Don't clear selectedSquare here, onSquareClick manages it
   }, []);
 
   const resetForNewPuzzle = useCallback(() => {
@@ -96,7 +99,8 @@ const PuzzlePage: React.FC = () => {
     setPuzzleExplanation(null);
     clearBoardVisuals();
     setFetchError(null);
-    setHintShown(false); // Reset hint state
+    setHintShown(false);
+    setSelectedSquare(null); // Reset selected square for new puzzle
   }, [clearBoardVisuals]);
 
   const fetchNewPuzzle = useCallback(
@@ -108,25 +112,47 @@ const PuzzlePage: React.FC = () => {
 
       try {
         const puzzleData = await getRandomPuzzle(themeToFetch);
-        if (puzzleData && puzzleData.fen) {
+        if (
+          puzzleData &&
+          puzzleData.fen &&
+          puzzleData.solutionMoves &&
+          puzzleData.solutionMoves.length > 0
+        ) {
           setCurrentPuzzle(puzzleData);
-          const newGame = new Chess(puzzleData.fen);
-          setGameInstance(newGame);
-          setPlayerToMove(newGame.turn());
-          setCurrentMoveIndexInSolution(0);
+          let gameAfterInitialComputerMove = new Chess(puzzleData.fen);
+          const initialComputerMove = puzzleData.solutionMoves[0];
+          const moveResult =
+            gameAfterInitialComputerMove.move(initialComputerMove);
+
+          if (!moveResult) {
+            console.error(
+              `Failed to make initial setup move "${initialComputerMove}" for puzzle ${puzzleData.puzzleId}. Loading original FEN.`
+            );
+            setGameInstance(new Chess(puzzleData.fen));
+            setPlayerToMove(new Chess(puzzleData.fen).turn());
+            setCurrentMoveIndexInSolution(0);
+            setUserMessage(
+              `Puzzle loaded (initial move error). ${
+                new Chess(puzzleData.fen).turn() === "w" ? "White" : "Black"
+              } to move.`
+            );
+          } else {
+            setGameInstance(gameAfterInitialComputerMove);
+            setPlayerToMove(gameAfterInitialComputerMove.turn());
+            setCurrentMoveIndexInSolution(1);
+            setUserMessage(
+              `Puzzle ready. ${
+                gameAfterInitialComputerMove.turn() === "w" ? "White" : "Black"
+              } to move.`
+            );
+          }
           setPuzzleStatus("active");
-          setUserMessage(
-            `Puzzle loaded: ${
-              MATE_THEMES.find((t) => t.value === puzzleData.theme)?.label ||
-              puzzleData.theme
-            }. ${newGame.turn() === "w" ? "White" : "Black"} to move.`
-          );
           console.log("Puzzle loaded:", puzzleData);
         } else {
           throw new Error("No valid puzzle data received from API.");
         }
       } catch (error) {
-        console.error("Failed to fetch puzzle:", error);
+        console.error("Failed to fetch or setup puzzle:", error);
         const message =
           error instanceof Error
             ? error.message
@@ -146,13 +172,27 @@ const PuzzlePage: React.FC = () => {
       targetSquare: Square,
       pieceString: string
     ): boolean => {
-      setHintShown(false); // Clear hint if user makes a move
-      setArrows([]); // Clear hint arrows
+      setHintShown(false);
+      setArrows([]);
+      setSelectedSquare(null); // Clear click-selection on drop
 
       if (puzzleStatus !== "active" || !currentPuzzle || !gameInstance) {
         return false;
       }
       const currentTurnInGame = gameInstance.turn();
+      if (
+        currentMoveIndexInSolution >= currentPuzzle.solutionMoves.length ||
+        (currentMoveIndexInSolution % 2 === 0 &&
+          currentPuzzle.solutionMoves.length > 1 &&
+          currentPuzzle.solutionMoves.length > currentMoveIndexInSolution)
+      ) {
+        console.warn(
+          "onPieceDrop: Not player's turn in sequence or sequence ended. Index:",
+          currentMoveIndexInSolution
+        );
+        setUserMessage("Not your turn in the puzzle sequence or puzzle ended.");
+        return false;
+      }
       if (!pieceString.startsWith(currentTurnInGame)) {
         setUserMessage(
           `It's ${currentTurnInGame === "w" ? "White" : "Black"}'s turn.`
@@ -177,87 +217,88 @@ const PuzzlePage: React.FC = () => {
         chessJsMoveObject.promotion = "q";
       }
 
-      if (currentMoveIndexInSolution >= currentPuzzle.solutionMoves.length) {
-        setUserMessage("Puzzle solution sequence ended. Start a new puzzle?");
-        setPuzzleStatus("error");
-        return false;
-      }
       const expectedMoveUCI =
         currentPuzzle.solutionMoves[currentMoveIndexInSolution];
       console.log(
-        `Player attempted: ${userMoveUCI}, Expected: ${expectedMoveUCI}`
+        `Player attempting move (sol. index ${currentMoveIndexInSolution}): ${userMoveUCI}, Expected: ${expectedMoveUCI}`
       );
 
       if (userMoveUCI === expectedMoveUCI) {
-        setUserMessage("Correct! Processing...");
         setPuzzleStatus("processingPlayerMove");
         const newGame = new Chess(gameInstance.fen());
         const moveResult = newGame.move(chessJsMoveObject);
-
         if (!moveResult) {
           console.error(
-            "CRITICAL ERROR: Validated player move failed on internal chess.js instance.",
+            "CRITICAL ERROR: Player's correct move failed on internal chess.js.",
             chessJsMoveObject
           );
-          setUserMessage(
-            "An error occurred applying your move. Please try a new puzzle."
-          );
+          setUserMessage("An error occurred. Please try a new puzzle.");
           setPuzzleStatus("error");
           return false;
         }
-
         setGameInstance(newGame);
-        const newPlayerMoveIndex = currentMoveIndexInSolution + 1;
-        setCurrentMoveIndexInSolution(newPlayerMoveIndex);
+        const nextMoveIndexAfterPlayer = currentMoveIndexInSolution + 1;
+        setCurrentMoveIndexInSolution(nextMoveIndexAfterPlayer);
         clearBoardVisuals();
 
-        if (
-          newGame.isCheckmate() ||
-          newPlayerMoveIndex >= currentPuzzle.solutionMoves.length
-        ) {
+        if (newGame.isCheckmate()) {
           setPuzzleStatus("solved");
           setUserMessage("Puzzle Solved! Checkmate!");
           console.log("Puzzle solved by player's move!");
-          // TODO: Fetch explanation for the solved puzzle
+          return true;
+        } else if (
+          nextMoveIndexAfterPlayer >= currentPuzzle.solutionMoves.length
+        ) {
+          console.warn(
+            "Reached end of solution moves after player's move, but not checkmate. Puzzle ID:",
+            currentPuzzle.id
+          );
+          setUserMessage("Sequence complete, but not checkmate by player.");
+          setPuzzleStatus("solved");
           return true;
         }
 
         setUserMessage("Correct! Opponent thinking...");
         setTimeout(() => {
-          if (newPlayerMoveIndex < currentPuzzle.solutionMoves.length) {
+          if (nextMoveIndexAfterPlayer < currentPuzzle.solutionMoves.length) {
             const opponentMoveNotation =
-              currentPuzzle.solutionMoves[newPlayerMoveIndex];
+              currentPuzzle.solutionMoves[nextMoveIndexAfterPlayer];
             const gameAfterOpponent = new Chess(newGame.fen());
             const opponentMoveResult =
               gameAfterOpponent.move(opponentMoveNotation);
-
             if (!opponentMoveResult) {
               console.error(
-                "Error making opponent's move from solution:",
+                "Error making opponent's move:",
                 opponentMoveNotation,
                 "FEN:",
-                newGame.fen()
+                newGame.fen(),
+                "Puzzle ID:",
+                currentPuzzle.id
               );
-              setUserMessage(
-                "Error with puzzle solution (opponent's move). Please try a new puzzle."
-              );
+              setUserMessage("Error with puzzle solution (opponent's move).");
               setPuzzleStatus("error");
               return;
             }
             setGameInstance(gameAfterOpponent);
-            const newOpponentMoveIndex = newPlayerMoveIndex + 1;
-            setCurrentMoveIndexInSolution(newOpponentMoveIndex);
+            const nextMoveIndexAfterOpponent = nextMoveIndexAfterPlayer + 1;
+            setCurrentMoveIndexInSolution(nextMoveIndexAfterOpponent);
             setPlayerToMove(gameAfterOpponent.turn());
-
-            if (
-              gameAfterOpponent.isCheckmate() ||
-              newOpponentMoveIndex >= currentPuzzle.solutionMoves.length
-            ) {
-              setPuzzleStatus("solved");
-              setUserMessage("Puzzle Solved!");
-              console.log(
-                "Puzzle solved after opponent's move or end of sequence!"
+            if (gameAfterOpponent.isCheckmate()) {
+              console.error(
+                "Opponent delivered checkmate - puzzle logic error. Puzzle ID:",
+                currentPuzzle.id
               );
+              setUserMessage("Opponent delivered checkmate!");
+              setPuzzleStatus("error");
+            } else if (
+              nextMoveIndexAfterOpponent >= currentPuzzle.solutionMoves.length
+            ) {
+              setUserMessage(
+                `Opponent replied. ${
+                  gameAfterOpponent.turn() === "w" ? "White" : "Black"
+                } to move for the win!`
+              );
+              setPuzzleStatus("active");
             } else {
               setUserMessage(
                 `Opponent replied. ${
@@ -283,6 +324,101 @@ const PuzzlePage: React.FC = () => {
     ]
   );
 
+  const onSquareClick = useCallback(
+    (square: Square) => {
+      setHintShown(false);
+      setArrows([]);
+
+      if (puzzleStatus !== "active" || !currentPuzzle || !gameInstance) {
+        clearBoardVisuals();
+        setSelectedSquare(null);
+        return;
+      }
+
+      const currentTurnInGame = gameInstance.turn();
+      const pieceOnClickedSquare = gameInstance.get(square);
+
+      if (selectedSquare) {
+        if (square === selectedSquare) {
+          clearBoardVisuals();
+          setSelectedSquare(null);
+          return;
+        }
+        const movesFromSelected = gameInstance.moves({
+          square: selectedSquare,
+          verbose: true,
+        });
+        const move = movesFromSelected.find((m) => m.to === square);
+        if (move) {
+          const pieceBeingMoved = gameInstance.get(selectedSquare);
+          if (pieceBeingMoved) {
+            const moveSuccessful = onPieceDrop(
+              selectedSquare,
+              square,
+              `${pieceBeingMoved.color}${pieceBeingMoved.type.toUpperCase()}`
+            );
+            // onPieceDrop now clears selectedSquare internally if successful or on any attempt
+            if (!moveSuccessful) {
+              // If onPieceDrop returned false (e.g. wrong move in sequence), re-highlight selected piece and its moves
+              const currentSelectedPieceMoves = gameInstance.moves({
+                square: selectedSquare,
+                verbose: true,
+              });
+              const newStyles: SquareStyles = {
+                [selectedSquare]: { backgroundColor: "rgba(255, 255, 0, 0.3)" },
+              };
+              currentSelectedPieceMoves.forEach((m) => {
+                newStyles[m.to] = {
+                  background:
+                    "radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)",
+                  borderRadius: "50%",
+                };
+              });
+              setSquareStyles(newStyles);
+            }
+          } else {
+            clearBoardVisuals();
+            setSelectedSquare(null);
+          }
+          return;
+        }
+      }
+
+      if (
+        pieceOnClickedSquare &&
+        pieceOnClickedSquare.color === currentTurnInGame
+      ) {
+        setSelectedSquare(square);
+        const validMoves = gameInstance.moves({
+          square: square,
+          verbose: true,
+        });
+        const newStyles: SquareStyles = {
+          [square]: { backgroundColor: "rgba(255, 255, 0, 0.3)" },
+        };
+        validMoves.forEach((m) => {
+          newStyles[m.to] = {
+            background:
+              "radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)",
+            borderRadius: "50%",
+          };
+        });
+        setSquareStyles(newStyles);
+      } else {
+        clearBoardVisuals();
+        setSelectedSquare(null);
+      }
+    },
+    [
+      gameInstance,
+      puzzleStatus,
+      currentPuzzle,
+      selectedSquare,
+      onPieceDrop,
+      clearBoardVisuals,
+    ]
+  );
+
   const handleHintClick = () => {
     if (
       !currentPuzzle ||
@@ -291,15 +427,24 @@ const PuzzlePage: React.FC = () => {
     ) {
       return;
     }
+    if (
+      currentMoveIndexInSolution % 2 === 0 &&
+      currentPuzzle.solutionMoves.length > 1 &&
+      currentPuzzle.solutionMoves.length > currentMoveIndexInSolution
+    ) {
+      setUserMessage(
+        "Hint is for your move. It's currently opponent's (simulated) turn in sequence."
+      );
+      return;
+    }
     setHintShown(true);
-
-    const nextMoveUCI = currentPuzzle.solutionMoves[currentMoveIndexInSolution];
-    if (nextMoveUCI && nextMoveUCI.length >= 4) {
-      const fromSquare = nextMoveUCI.substring(0, 2) as Square;
-      const toSquare = nextMoveUCI.substring(2, 4) as Square;
-      const hintArrowColor = "rgba(0, 100, 255, 0.5)"; // A distinct blue for hint
-
-      setArrows([[fromSquare, toSquare, hintArrowColor]]); // Show only the hint arrow
+    const nextPlayerMoveUCI =
+      currentPuzzle.solutionMoves[currentMoveIndexInSolution];
+    if (nextPlayerMoveUCI && nextPlayerMoveUCI.length >= 4) {
+      const fromSquare = nextPlayerMoveUCI.substring(0, 2) as Square;
+      const toSquare = nextPlayerMoveUCI.substring(2, 4) as Square;
+      const hintArrowColor = "rgba(0, 100, 255, 0.5)";
+      setArrows([[fromSquare, toSquare, hintArrowColor]]);
       setUserMessage(
         `Hint: Consider moving from ${fromSquare} to ${toSquare}.`
       );
@@ -308,7 +453,6 @@ const PuzzlePage: React.FC = () => {
     }
   };
 
-  // --- Effects ---
   useEffect(() => {
     const handleResize = () => {
       if (boardContainerRef.current) {
@@ -325,47 +469,68 @@ const PuzzlePage: React.FC = () => {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // --- Render ---
   return (
     <div className="flex flex-col md:flex-row gap-4 md:gap-6">
-      {/* Left Column: Board and Controls */}
       <div className="flex-grow md:w-2/3 flex flex-col">
         <div className="mb-4 p-4 border rounded-lg shadow bg-card">
           <h3 className="text-lg font-semibold mb-3">Puzzle Controls</h3>
-          <div className="flex flex-col sm:flex-row sm:items-end gap-3">
-            <div className="flex-grow">
-              <Label htmlFor="theme-select">Select Puzzle Type:</Label>
-              <Select
-                value={selectedTheme}
-                onValueChange={(value) => setSelectedTheme(value)}
-                disabled={
-                  puzzleStatus === "loadingNewPuzzle" ||
-                  puzzleStatus === "processingPlayerMove"
-                }
-              >
-                <SelectTrigger id="theme-select" className="w-full mt-1">
-                  <SelectValue placeholder="Select mate type" />
-                </SelectTrigger>
-                <SelectContent>
-                  {MATE_THEMES.map((theme) => (
-                    <SelectItem key={theme.value} value={theme.value}>
-                      {theme.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+          <div className="mb-3">
+            <Label htmlFor="theme-select" className="mb-1 block">
+              Select Puzzle Type:
+            </Label>
+            <Select
+              value={selectedTheme}
+              onValueChange={(value) => setSelectedTheme(value)}
+              disabled={
+                puzzleStatus === "loadingNewPuzzle" ||
+                puzzleStatus === "processingPlayerMove"
+              }
+            >
+              <SelectTrigger id="theme-select" className="w-full">
+                <SelectValue placeholder="Select mate type" />
+              </SelectTrigger>
+              <SelectContent>
+                {MATE_THEMES.map((theme) => (
+                  <SelectItem key={theme.value} value={theme.value}>
+                    {theme.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
             <Button
               onClick={() => fetchNewPuzzle(selectedTheme)}
               disabled={
                 puzzleStatus === "loadingNewPuzzle" ||
                 puzzleStatus === "processingPlayerMove"
               }
-              className="w-full sm:w-auto"
+              className="w-full sm:flex-1"
             >
               {puzzleStatus === "loadingNewPuzzle"
                 ? "Loading..."
                 : "New Puzzle"}
+            </Button>
+            <Button
+              variant="outline"
+              className="w-full sm:flex-1 flex items-center justify-center gap-2 border-gray-300 hover:border-gray-400 dark:border-gray-600 dark:hover:border-gray-500"
+              onClick={handleHintClick}
+              disabled={
+                !currentPuzzle ||
+                puzzleStatus !== "active" ||
+                hintShown ||
+                (currentPuzzle &&
+                  currentMoveIndexInSolution >=
+                    currentPuzzle.solutionMoves.length) ||
+                (currentMoveIndexInSolution % 2 === 0 &&
+                  currentPuzzle &&
+                  currentPuzzle.solutionMoves.length > 1 &&
+                  currentPuzzle.solutionMoves.length >
+                    currentMoveIndexInSolution) // Disable hint if it's "opponent's turn" in sequence
+              }
+            >
+              <Lightbulb size={18} />
+              {hintShown ? "Hint Shown" : "Get Hint"}
             </Button>
           </div>
           {fetchError && (
@@ -392,32 +557,10 @@ const PuzzlePage: React.FC = () => {
                 boardWidth={boardWidth}
                 position={gameInstance.fen()}
                 squareStyles={squareStyles}
-                arrows={arrows} // Pass arrows state for hints
-                moveNumberStyles={{}} // Not using move numbers for puzzles yet
+                arrows={arrows}
+                moveNumberStyles={{}}
                 onPieceDrop={onPieceDrop}
-                onSquareClick={(square: Square) => {
-                  if (
-                    puzzleStatus === "active" &&
-                    gameInstance.get(square)?.color === gameInstance.turn()
-                  ) {
-                    const moves = gameInstance.moves({ square, verbose: true });
-                    const newStyles: SquareStyles = {
-                      [square]: { backgroundColor: "rgba(255, 255, 0, 0.3)" },
-                    };
-                    moves.forEach((move) => {
-                      newStyles[move.to] = {
-                        background:
-                          "radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)",
-                        borderRadius: "50%",
-                      };
-                    });
-                    setSquareStyles(newStyles);
-                    setArrows([]); // Clear hint arrows if user clicks to select a piece
-                    setHintShown(false);
-                  } else {
-                    clearBoardVisuals();
-                  }
-                }}
+                onSquareClick={onSquareClick} // Pass the named callback
                 arePiecesDraggable={puzzleStatus === "active"}
                 boardOrientation={playerToMove === "w" ? "white" : "black"}
               />
@@ -441,7 +584,6 @@ const PuzzlePage: React.FC = () => {
         )}
       </div>
 
-      {/* Right Column: Puzzle Info/Explanation */}
       <div className="w-full md:w-1/3 flex-shrink-0 mt-4 md:mt-0">
         <div className="p-4 border rounded-lg shadow bg-card min-h-[200px]">
           <h3 className="text-lg font-semibold mb-2">
@@ -449,13 +591,12 @@ const PuzzlePage: React.FC = () => {
           </h3>
           {puzzleStatus === "loadingNewPuzzle" && !currentPuzzle && (
             <div className="space-y-2">
-              <Skeleton className="h-4 w-1/3" />
+              <Skeleton className="h-4 w-1/3" />{" "}
               <Skeleton className="h-4 w-1/2" />
             </div>
           )}
           {currentPuzzle && puzzleStatus !== "loadingNewPuzzle" && (
             <div className="text-sm mb-2">
-              {/* --- Display Lichess Puzzle ID --- */}
               {currentPuzzle.puzzleId && (
                 <p>
                   <strong>Puzzle ID:</strong> {currentPuzzle.puzzleId}
@@ -473,11 +614,9 @@ const PuzzlePage: React.FC = () => {
               )}
             </div>
           )}
-
           {puzzleStatus === "loadingExplanation" && (
             <p className="text-sm text-gray-500">Loading explanation...</p>
           )}
-
           {puzzleExplanation ? (
             <div className="text-sm whitespace-pre-wrap mt-2 border-t pt-2">
               {puzzleExplanation}
@@ -493,46 +632,8 @@ const PuzzlePage: React.FC = () => {
               </p>
             )
           )}
-
           <div className="mt-4 space-y-2">
-            <Button
-              variant="outline"
-              className="w-full"
-              onClick={() => {
-                // TODO: Implement Show Solution Logic (Step 2.F)
-                console.log(
-                  "Show solution clicked. Current puzzle:",
-                  currentPuzzle
-                );
-                setUserMessage("Showing solution (placeholder)...");
-                setPuzzleStatus("showingSolution");
-                setArrows([]); // Clear hint arrows when showing solution
-                setHintShown(false);
-              }}
-              disabled={
-                !currentPuzzle ||
-                puzzleStatus === "loadingNewPuzzle" ||
-                puzzleStatus === "showingSolution" ||
-                puzzleStatus === "processingPlayerMove"
-              }
-            >
-              Show Solution
-            </Button>
-            <Button
-              variant="outline"
-              className="w-full"
-              onClick={handleHintClick}
-              disabled={
-                !currentPuzzle ||
-                puzzleStatus !== "active" ||
-                hintShown ||
-                (currentPuzzle &&
-                  currentMoveIndexInSolution >=
-                    currentPuzzle.solutionMoves.length)
-              }
-            >
-              {hintShown ? "Hint Shown" : "Get Hint"}
-            </Button>
+            {/* Show Solution Button Removed */}
           </div>
         </div>
       </div>
